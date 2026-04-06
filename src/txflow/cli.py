@@ -6,7 +6,13 @@ import sys
 from pathlib import Path
 
 from .analysis import analyze_transactions_from_path
-from .annotations import build_review_annotations, export_annotations_csv, export_annotations_jsonl, load_annotation_manifests
+from .annotations import (
+    AnnotationRow,
+    build_review_annotations,
+    export_annotations_csv,
+    export_annotations_jsonl,
+    load_annotation_manifests,
+)
 from .catalog import export_label_catalog_json, export_label_catalog_markdown
 from .gnn_pipeline import (
     build_round_report,
@@ -49,6 +55,7 @@ from .gnn_pipeline import (
 from .graph_risk import export_graph_triage_json, export_graph_triage_markdown, score_directory
 from .labels import build_review_manifest, export_label_manifest, load_label_manifests, merge_label_manifests
 from .model import BaselineTextClassifier, train_baseline_classifier
+from .pdf_ingest import export_wechat_pdf_rows_csv, export_wechat_pdf_rows_jsonl, load_wechat_pdf_rows_from_path
 from .roles import export_role_annotations_csv, export_role_annotations_jsonl
 from .ledger_ops import OwnerSummaryReport, OwnerSummaryRow
 from .ledger_ops import (
@@ -136,10 +143,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Transaction network risk analysis toolkit")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    analyze_parser = subparsers.add_parser("analyze", help="Analyze one CSV file or a directory of CSV files")
-    analyze_parser.add_argument("input", help="CSV file or directory")
+    analyze_parser = subparsers.add_parser("analyze", help="Analyze one CSV/PDF file or a directory of CSV/PDF files")
+    analyze_parser.add_argument("input", help="CSV/PDF file or directory")
     analyze_parser.add_argument("--format", choices=["markdown", "json"], default="markdown")
     analyze_parser.add_argument("--output", "-o", help="Output file")
+    analyze_parser.add_argument("--ocr-command", help="Optional OCR command for image-based PDFs; use {image} as the input placeholder")
+    analyze_parser.add_argument("--account-name", help="Optional account name override for payment PDFs")
+
+    extract_pdf_parser = subparsers.add_parser("extract-payment-pdf", help="Extract WeChat or Alipay payment PDFs into normalized rows or annotations")
+    extract_pdf_parser.add_argument("input", help="PDF file or directory")
+    extract_pdf_parser.add_argument("--csv", help="Output normalized ledger CSV")
+    extract_pdf_parser.add_argument("--jsonl", help="Output normalized ledger JSONL")
+    extract_pdf_parser.add_argument("--annotations-csv", help="Output simplified annotation CSV")
+    extract_pdf_parser.add_argument("--annotations-jsonl", help="Output simplified annotation JSONL")
+    extract_pdf_parser.add_argument("--label", choices=["positive", "negative", "skip"], default="positive", help="Annotation label to assign when exporting annotations")
+    extract_pdf_parser.add_argument("--note", default="", help="Optional note attached to exported annotations")
+    extract_pdf_parser.add_argument("--ocr-command", help="Optional OCR command for image-based PDFs; use {image} as the input placeholder")
+    extract_pdf_parser.add_argument("--account-name", help="Optional account name override for payment PDFs")
 
     export_parser = subparsers.add_parser("export-training", help="Export labeled samples from an xlsx file")
     export_parser.add_argument("--xlsx", required=True, help="Source xlsx file")
@@ -309,6 +329,12 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--md", help="Output review Markdown file")
     review_parser.add_argument("--threshold", type=float, default=0.7, help="Minimum score threshold")
     review_parser.add_argument("--limit", type=int, default=100, help="Max review candidates")
+    review_parser.add_argument(
+        "--entity-type",
+        choices=["auto", "transaction", "seller_account"],
+        default="transaction",
+        help="Export transaction rows or aggregated seller-account candidates",
+    )
 
     import_review_parser = subparsers.add_parser("import-review-labels", help="Convert manual review CSV or XLSX results into label manifests")
     import_review_parser.add_argument("--reviews", required=True, help="Reviewed CSV or XLSX file")
@@ -406,10 +432,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_analyze(args: argparse.Namespace) -> str:
     _existing_file(args.input, "input file") if Path(args.input).is_file() else _existing_directory(args.input, "input directory")
-    result = analyze_transactions_from_path(Path(args.input))
+    result = analyze_transactions_from_path(Path(args.input), ocr_command=args.ocr_command, account_name=args.account_name)
     if args.format == "json":
         return render_json_report(result)
     return render_markdown_report(result)
+
+
+def run_extract_payment_pdf(args: argparse.Namespace) -> str:
+    _existing_file(args.input, "input file") if Path(args.input).is_file() else _existing_directory(args.input, "input directory")
+    if not any([args.csv, args.jsonl, args.annotations_csv, args.annotations_jsonl]):
+        raise ValueError("provide at least one output path for --csv, --jsonl, --annotations-csv, or --annotations-jsonl")
+    rows = load_wechat_pdf_rows_from_path(args.input, ocr_command=args.ocr_command, account_name=args.account_name)
+    if args.csv:
+        export_wechat_pdf_rows_csv(rows, args.csv)
+    if args.jsonl:
+        export_wechat_pdf_rows_jsonl(rows, args.jsonl)
+    if args.annotations_csv or args.annotations_jsonl:
+        note = args.note.strip() or "imported from payment pdf"
+        annotations = [AnnotationRow(transaction_id=row.record_id, label_status=args.label, note=note) for row in rows]
+        if args.annotations_csv:
+            export_annotations_csv(annotations, args.annotations_csv)
+        if args.annotations_jsonl:
+            export_annotations_jsonl(annotations, args.annotations_jsonl)
+    return f"extracted {len(rows)} payment-pdf rows"
 
 
 def run_export_training(args: argparse.Namespace) -> str:
@@ -806,7 +851,7 @@ def run_score_gnn(args: argparse.Namespace) -> str:
         export_gnn_score_json(report, args.json)
     if args.md:
         export_gnn_score_markdown(report, args.md)
-    return f"scored {report.total_rows} rows; top_rows={len(report.top_rows)}"
+    return f"scored {report.total_rows} rows; top_rows={len(report.top_rows)}; seller_candidates={len(report.seller_candidates)}"
 
 
 def run_export_review_candidates(args: argparse.Namespace) -> str:
@@ -820,6 +865,7 @@ def run_export_review_candidates(args: argparse.Namespace) -> str:
         md_path=args.md,
         threshold=args.threshold,
         limit=args.limit,
+        entity_type=args.entity_type,
     )
     return f"exported {len(rows)} review candidates"
 
@@ -1049,6 +1095,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "analyze":
             content = run_analyze(args)
+        elif args.command == "extract-payment-pdf":
+            content = run_extract_payment_pdf(args)
         elif args.command == "export-training":
             content = run_export_training(args)
         elif args.command == "export-dataset":

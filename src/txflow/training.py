@@ -9,22 +9,12 @@ from pathlib import Path
 from typing import Any
 import re
 
+from .identifiers import choose_transaction_id
 from .excel import load_xlsx_rows
 from .labels import LabelManifest, build_label_index, load_label_manifests
 from .owners import OwnerLookup, load_owner_annotations
 from .rule_config import detect_rule_signals, derive_trade_pattern, flow_family_for_trade_pattern
 from .roles import RoleLookup, load_role_annotations
-
-
-TRANSACTION_ID_HEADERS = [
-    "交易流水号",
-    "流水号",
-    "交易单号",
-    "订单号",
-    "记录编号",
-    "交易编号",
-    "id",
-]
 
 TIMESTAMP_FORMATS = [
     "%Y-%m-%d %H:%M:%S",
@@ -116,6 +106,8 @@ class TrainingExample:
     owner_name: str = ""
     owner_confidence: str = ""
     owner_evidence: str = ""
+    extension_role: str = ""
+    anchor_subject: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -169,6 +161,8 @@ class TrainingExample:
             "owner_name": self.owner_name,
             "owner_confidence": self.owner_confidence,
             "owner_evidence": self.owner_evidence,
+            "extension_role": self.extension_role,
+            "anchor_subject": self.anchor_subject,
         }
 
 
@@ -191,14 +185,6 @@ def _pick_field(row: dict[str, str], candidates: list[str]) -> str:
         key = candidate.strip().lower().replace(" ", "")
         if key in normalized and normalized[key]:
             return str(normalized[key]).strip()
-    return ""
-
-
-def _choose_transaction_id(row: dict[str, str]) -> str:
-    normalized_candidates = {item.replace(" ", "") for item in TRANSACTION_ID_HEADERS}
-    for key, value in row.items():
-        if str(key).strip().replace(" ", "").lower() in normalized_candidates and value:
-            return str(value).strip()
     return ""
 
 
@@ -371,6 +357,38 @@ def _manifest_signature(manifest: LabelManifest) -> tuple[str, str, str]:
     return (manifest.label, manifest.polarity, manifest.subject)
 
 
+def _infer_extension_role(
+    manifest: LabelManifest | None,
+    derived: dict[str, Any],
+    role_label: str,
+) -> tuple[str, str]:
+    if manifest is None:
+        return "", ""
+    subject = str(manifest.subject or "").strip()
+    label = str(manifest.label or "").strip().lower()
+    subject_text = _normalize_text(subject)
+    seller_account = _normalize_text(str(derived.get("seller_account", "")))
+    buyer_account = _normalize_text(str(derived.get("buyer_account", "")))
+
+    if manifest.polarity == "positive":
+        if "嫖客" in subject or "payment" in label or role_label == "buyer":
+            return "buyer_to_known_seller", subject
+        if seller_account and ("卖淫女" in subject or "income" in label or role_label == "seller"):
+            return "seller_anchor", subject
+        if buyer_account and seller_account:
+            return "buyer_to_known_seller", subject
+        return ("seller_anchor" if subject_text else "positive_transaction"), subject
+
+    if manifest.polarity == "negative":
+        if derived.get("is_platform_settlement") or derived.get("is_withdrawal_like"):
+            return "non_extension_negative", subject
+        if derived.get("trade_pattern") == "merchant_consume":
+            return "non_extension_negative", subject
+        return "negative_transaction", subject
+
+    return "", subject
+
+
 def _build_manifest_lookup(manifests: list[LabelManifest]) -> dict[str, LabelManifest]:
     manifest_by_id: dict[str, LabelManifest] = {}
     conflicts: list[str] = []
@@ -402,8 +420,8 @@ def build_positive_training_samples(
     manifest_by_id = _build_manifest_lookup(manifests)
 
     samples: list[TrainingSample] = []
-    for row in rows:
-        transaction_id = _choose_transaction_id(row)
+    for row_index, row in enumerate(rows, start=1):
+        transaction_id = choose_transaction_id(row, row_index=row_index)
         if transaction_id not in label_index:
             continue
         manifest = manifest_by_id[transaction_id]
@@ -437,7 +455,7 @@ def build_training_examples(
 
     examples: list[TrainingExample] = []
     for index, row in enumerate(rows, start=1):
-        transaction_id = _choose_transaction_id(row)
+        transaction_id = choose_transaction_id(row, row_index=index)
         manifest = manifest_by_id.get(transaction_id)
         timestamp = _pick_any(row, ["交易时间", "时间", "发生时间", "日期时间"])
         hour = _hour_index(timestamp)
@@ -447,6 +465,11 @@ def build_training_examples(
         )
         owner = owner_lookup.resolve(transaction_id, counterparty)
         role = role_lookup.resolve(transaction_id, counterparty, owner.owner_id if owner else "")
+        extension_role, anchor_subject = _infer_extension_role(
+            manifest,
+            derived,
+            role.role_label if role else "",
+        )
         examples.append(
             TrainingExample(
                 row_index=index,
@@ -499,6 +522,8 @@ def build_training_examples(
                 owner_name=owner.owner_name if owner else "",
                 owner_confidence=owner.confidence if owner else "",
                 owner_evidence=owner.evidence if owner else "",
+                extension_role=extension_role,
+                anchor_subject=anchor_subject,
             )
         )
     return examples
@@ -569,6 +594,8 @@ def export_training_examples_csv(examples: list[TrainingExample], output_path: s
                 "is_platform_settlement",
                 "is_failed_or_invalid",
                 "is_trade_like",
+                "extension_role",
+                "anchor_subject",
             ],
         )
         writer.writeheader()

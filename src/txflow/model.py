@@ -95,24 +95,24 @@ def example_to_tokens(example: TrainingExample) -> list[str]:
         tokens.append(f"role_confidence:{example.role_confidence}")
     if example.role_scene:
         tokens.append(f"role_scene:{example.role_scene}")
-    if example.owner_id:
-        tokens.append(f"owner_id:{example.owner_id}")
     if example.owner_confidence:
         tokens.append(f"owner_confidence:{example.owner_confidence}")
+    if example.extension_role:
+        tokens.append(f"extension_role:{example.extension_role}")
+    if example.anchor_subject:
+        tokens.extend(_tokenize(example.anchor_subject, "anchor_subject"))
+    tokens.append(f"has_subject_account:{int(bool(example.subject_account))}")
+    tokens.append(f"has_payer_account:{int(bool(example.payer_account))}")
+    tokens.append(f"has_payee_account:{int(bool(example.payee_account))}")
+    tokens.append(f"has_buyer_account:{int(bool(example.buyer_account))}")
+    tokens.append(f"has_seller_account:{int(bool(example.seller_account))}")
     tokens.extend(_tokenize(example.counterparty, "counterparty"))
-    tokens.extend(_tokenize(example.counterparty_account, "counterparty_account"))
     tokens.extend(_tokenize(example.counterparty_name, "counterparty_name"))
     tokens.extend(_tokenize(example.remark, "remark"))
     tokens.extend(_tokenize(example.direction, "direction"))
     tokens.extend(_tokenize(example.channel, "channel"))
-    tokens.extend(_tokenize(example.subject_account, "subject_account"))
-    tokens.extend(_tokenize(example.payer_account, "payer_account"))
-    tokens.extend(_tokenize(example.payee_account, "payee_account"))
     tokens.extend(_tokenize(example.merchant_name, "merchant_name"))
-    tokens.extend(_tokenize(example.buyer_account, "buyer_account"))
-    tokens.extend(_tokenize(example.seller_account, "seller_account"))
     tokens.extend(_tokenize(example.seller_proxy_name, "seller_proxy"))
-    tokens.extend(_tokenize(example.owner_name, "owner_name"))
     if not tokens:
         tokens.append("bias:1")
     return tokens

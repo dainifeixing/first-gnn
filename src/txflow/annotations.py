@@ -6,25 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .excel import load_xlsx_styled_rows
+from .identifiers import choose_transaction_id
 from .labels import LabelManifest
-
-
-TRANSACTION_ID_HEADERS = [
-    "transaction_id",
-    "交易流水号",
-    "流水号",
-    "交易单号",
-    "订单号",
-    "记录编号",
-    "交易编号",
-    "id",
-]
 
 
 @dataclass(frozen=True)
 class AnnotationRow:
     transaction_id: str
     label_status: str
+    extension_role: str = ""
+    anchor_subject: str = ""
     note: str = ""
 
 
@@ -56,6 +47,8 @@ def _annotation_rows_from_csv(path: Path) -> list[AnnotationRow]:
                 AnnotationRow(
                     transaction_id=transaction_id,
                     label_status=_normalize_label_status(str(row.get("label", row.get("label_status", "")))),
+                    extension_role=str(row.get("extension_role", "")).strip(),
+                    anchor_subject=str(row.get("anchor_subject", "")).strip(),
                     note=str(row.get("note", "")).strip(),
                 )
             )
@@ -74,25 +67,18 @@ def _annotation_rows_from_jsonl(path: Path) -> list[AnnotationRow]:
                 AnnotationRow(
                     transaction_id=transaction_id,
                     label_status=_normalize_label_status(str(payload.get("label", payload.get("label_status", "")))),
+                    extension_role=str(payload.get("extension_role", "")).strip(),
+                    anchor_subject=str(payload.get("anchor_subject", "")).strip(),
                     note=str(payload.get("note", "")).strip(),
                 )
             )
     return rows
 
 
-def _pick_transaction_id(row: dict[str, str]) -> str:
-    normalized = {str(key).strip().lower().replace(" ", ""): str(value).strip() for key, value in row.items()}
-    for candidate in TRANSACTION_ID_HEADERS:
-        key = candidate.strip().lower().replace(" ", "")
-        if normalized.get(key):
-            return normalized[key]
-    return ""
-
-
 def _annotation_rows_from_xlsx(path: Path) -> list[AnnotationRow]:
     rows: list[AnnotationRow] = []
-    for item in load_xlsx_styled_rows(path):
-        transaction_id = _pick_transaction_id(item.values)
+    for row_index, item in enumerate(load_xlsx_styled_rows(path), start=1):
+        transaction_id = choose_transaction_id(item.values, row_index=row_index)
         if not transaction_id:
             continue
         review_label = str(item.values.get("review_label", "")).strip().lower()
@@ -100,6 +86,8 @@ def _annotation_rows_from_xlsx(path: Path) -> list[AnnotationRow]:
             label_status = _normalize_label_status(review_label)
         elif item.fill_label == "red":
             label_status = "positive"
+        elif item.fill_label == "green":
+            label_status = "negative"
         elif item.fill_label == "yellow":
             label_status = "skip"
         else:
@@ -108,6 +96,8 @@ def _annotation_rows_from_xlsx(path: Path) -> list[AnnotationRow]:
             AnnotationRow(
                 transaction_id=transaction_id,
                 label_status=label_status,
+                extension_role=str(item.values.get("extension_role", "")).strip(),
+                anchor_subject=str(item.values.get("anchor_subject", "")).strip(),
                 note=str(item.values.get("review_note", "")).strip(),
             )
         )
@@ -196,6 +186,8 @@ def build_review_annotations(review_csv_path: str | Path) -> list[AnnotationRow]
                 AnnotationRow(
                     transaction_id=transaction_id,
                     label_status=label_status,
+                    extension_role=str(row.get("extension_role", "")).strip(),
+                    anchor_subject=str(row.get("anchor_subject", "")).strip(),
                     note=str(row.get("review_note", "")).strip(),
                 )
             )
@@ -206,13 +198,15 @@ def export_annotations_csv(rows: list[AnnotationRow], output_path: str | Path) -
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["transaction_id", "label", "note"])
+        writer = csv.DictWriter(handle, fieldnames=["transaction_id", "label", "extension_role", "anchor_subject", "note"])
         writer.writeheader()
         for row in rows:
             writer.writerow(
                 {
                     "transaction_id": row.transaction_id,
                     "label": row.label_status,
+                    "extension_role": row.extension_role,
+                    "anchor_subject": row.anchor_subject,
                     "note": row.note,
                 }
             )
@@ -229,6 +223,8 @@ def export_annotations_jsonl(rows: list[AnnotationRow], output_path: str | Path)
                     {
                         "transaction_id": row.transaction_id,
                         "label": row.label_status,
+                        "extension_role": row.extension_role,
+                        "anchor_subject": row.anchor_subject,
                         "note": row.note,
                     },
                     ensure_ascii=False,

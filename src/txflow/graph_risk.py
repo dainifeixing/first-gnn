@@ -176,57 +176,54 @@ def _numeric_features(example: TrainingExample) -> list[float]:
     ]
 
 
-def _owner_aggregate_features(examples: list[TrainingExample]) -> list[list[float]]:
-    owner_rows: dict[str, list[int]] = defaultdict(list)
-    owner_counterparties: dict[str, set[str]] = defaultdict(set)
-    owner_inflow: dict[str, int] = defaultdict(int)
-    owner_outflow: dict[str, int] = defaultdict(int)
-    owner_channels: dict[str, set[str]] = defaultdict(set)
-    owner_workbooks: dict[str, set[str]] = defaultdict(set)
+def _extension_aggregate_features(examples: list[TrainingExample]) -> list[list[float]]:
+    buyer_rows: dict[str, list[int]] = defaultdict(list)
+    buyer_sellers: dict[str, set[str]] = defaultdict(set)
+    buyer_known_sellers: dict[str, set[str]] = defaultdict(set)
+    seller_rows: dict[str, list[int]] = defaultdict(list)
+    seller_buyers: dict[str, set[str]] = defaultdict(set)
+    seller_workbooks: dict[str, set[str]] = defaultdict(set)
+    seller_known_buyer_support: dict[str, set[str]] = defaultdict(set)
 
     for index, example in enumerate(examples):
-        owner_id = str(example.owner_id or "").strip()
-        if not owner_id:
-            continue
-        owner_rows[owner_id].append(index)
-        counterparty = _normalize_text(example.counterparty)
-        if counterparty:
-            owner_counterparties[owner_id].add(counterparty)
-        direction_index = _direction_index(example.direction)
-        if direction_index == 0:
-            owner_inflow[owner_id] += 1
-        elif direction_index == 1:
-            owner_outflow[owner_id] += 1
-        channel = _normalize_text(example.channel)
-        if channel:
-            owner_channels[owner_id].add(channel)
-        source_file = str(example.source_file or "").strip()
-        if source_file:
-            owner_workbooks[owner_id].add(source_file)
+        buyer_account = _normalize_text(example.buyer_account)
+        seller_account = _normalize_text(example.seller_account)
+        workbook = str(example.source_file or "").strip() or "__unknown__"
+        if buyer_account:
+            buyer_rows[buyer_account].append(index)
+            if seller_account:
+                buyer_sellers[buyer_account].add(seller_account)
+                if example.extension_role == "buyer_to_known_seller":
+                    buyer_known_sellers[buyer_account].add(seller_account)
+        if seller_account:
+            seller_rows[seller_account].append(index)
+            seller_workbooks[seller_account].add(workbook)
+            if buyer_account:
+                seller_buyers[seller_account].add(buyer_account)
+                if buyer_account in buyer_known_sellers:
+                    seller_known_buyer_support[seller_account].add(buyer_account)
 
     feature_rows: list[list[float]] = []
     for example in examples:
-        owner_id = str(example.owner_id or "").strip()
-        if not owner_id:
-            feature_rows.append([0.0] * 8)
-            continue
-        tx_count = len(owner_rows.get(owner_id, []))
-        unique_counterparties = len(owner_counterparties.get(owner_id, set()))
-        inflow = owner_inflow.get(owner_id, 0)
-        outflow = owner_outflow.get(owner_id, 0)
-        total_flow = inflow + outflow
-        channel_count = len(owner_channels.get(owner_id, set()))
-        workbook_count = len(owner_workbooks.get(owner_id, set()))
+        buyer_account = _normalize_text(example.buyer_account)
+        seller_account = _normalize_text(example.seller_account)
+        buyer_tx_count = len(buyer_rows.get(buyer_account, [])) if buyer_account else 0
+        buyer_unique_sellers = len(buyer_sellers.get(buyer_account, set())) if buyer_account else 0
+        buyer_known_support = len(buyer_known_sellers.get(buyer_account, set())) if buyer_account else 0
+        seller_tx_count = len(seller_rows.get(seller_account, [])) if seller_account else 0
+        seller_unique_buyers = len(seller_buyers.get(seller_account, set())) if seller_account else 0
+        seller_workbook_count = len(seller_workbooks.get(seller_account, set())) if seller_account else 0
+        seller_known_buyer_count = len(seller_known_buyer_support.get(seller_account, set())) if seller_account else 0
         feature_rows.append(
             [
-                math.log1p(tx_count),
-                math.log1p(unique_counterparties),
-                inflow / total_flow if total_flow else 0.0,
-                outflow / total_flow if total_flow else 0.0,
-                1.0 if inflow > 0 and outflow > 0 else 0.0,
-                math.log1p(channel_count),
-                math.log1p(workbook_count),
-                math.log1p(abs(inflow - outflow) + 1.0),
+                math.log1p(buyer_tx_count),
+                math.log1p(buyer_unique_sellers),
+                math.log1p(buyer_known_support),
+                math.log1p(seller_tx_count),
+                math.log1p(seller_unique_buyers),
+                math.log1p(seller_workbook_count),
+                math.log1p(seller_known_buyer_count),
+                1.0 if seller_unique_buyers >= 2 else 0.0,
             ]
         )
     return feature_rows
@@ -267,16 +264,14 @@ def _graph_tokens(example: TrainingExample) -> list[str]:
         tokens.append("failed_or_invalid")
     if example.is_trade_like:
         tokens.append("trade_like")
+    if example.extension_role:
+        tokens.append(f"extension_role:{example.extension_role}")
     if example.buyer_account:
-        tokens.append(f"buyer:{_normalize_text(example.buyer_account)}")
+        tokens.append("has_buyer_account")
     if example.seller_account:
-        tokens.append(f"seller:{_normalize_text(example.seller_account)}")
+        tokens.append("has_seller_account")
     if example.seller_proxy_name:
         tokens.append(f"seller_proxy:{_normalize_text(example.seller_proxy_name)}")
-    if example.owner_id:
-        tokens.append(f"owner:{example.owner_id}")
-    if example.owner_name:
-        tokens.append(f"owner_name:{_normalize_text(example.owner_name)}")
     return [token for token in tokens if token]
 
 
@@ -631,10 +626,10 @@ class GraphDataset:
 
 def _build_feature_matrix(examples: list[TrainingExample], token_buckets: int = 128) -> torch.Tensor:
     numeric_rows = [_numeric_features(example) for example in examples]
-    owner_rows = _owner_aggregate_features(examples)
+    extension_rows = _extension_aggregate_features(examples)
     token_rows = [_token_features(example, token_buckets) for example in examples]
     features = torch.tensor(
-        [numeric + owner + token for numeric, owner, token in zip(numeric_rows, owner_rows, token_rows)],
+        [numeric + extension + token for numeric, extension, token in zip(numeric_rows, extension_rows, token_rows)],
         dtype=torch.float32,
     )
     if features.numel() == 0:
@@ -662,6 +657,8 @@ def _build_graph(rows: list[tuple[str, TrainingExample]]) -> tuple[torch.Tensor,
     workbook_groups: dict[str, list[int]] = defaultdict(list)
     counterparty_groups: dict[str, list[int]] = defaultdict(list)
     owner_groups: dict[str, list[int]] = defaultdict(list)
+    buyer_groups: dict[str, list[int]] = defaultdict(list)
+    seller_groups: dict[str, list[int]] = defaultdict(list)
     token_groups: dict[str, list[int]] = defaultdict(list)
 
     for index, (source_path, example) in enumerate(rows):
@@ -672,6 +669,12 @@ def _build_graph(rows: list[tuple[str, TrainingExample]]) -> tuple[torch.Tensor,
         owner_id = str(example.owner_id or "").strip()
         if owner_id:
             owner_groups[owner_id].append(index)
+        buyer_account = _normalize_text(example.buyer_account)
+        if buyer_account:
+            buyer_groups[buyer_account].append(index)
+        seller_account = _normalize_text(example.seller_account)
+        if seller_account:
+            seller_groups[seller_account].append(index)
         for token in _graph_tokens(example):
             token_groups[token].append(index)
 
@@ -682,8 +685,8 @@ def _build_graph(rows: list[tuple[str, TrainingExample]]) -> tuple[torch.Tensor,
                 if i + offset >= len(indices):
                     continue
                 right = indices[i + offset]
-                _add_edge(edge_map, left, right, weight)
-                _add_edge(edge_map, right, left, weight)
+                _add_edge(edge_map, left, right, weight * 0.35)
+                _add_edge(edge_map, right, left, weight * 0.35)
 
     for indices in counterparty_groups.values():
         indices.sort(key=lambda item: examples[item].row_index)
@@ -696,8 +699,41 @@ def _build_graph(rows: list[tuple[str, TrainingExample]]) -> tuple[torch.Tensor,
         indices.sort(key=lambda item: (examples[item].source_file, examples[item].row_index))
         if len(indices) > 1:
             for left, right in zip(indices, indices[1:]):
-                _add_edge(edge_map, left, right, 2.0)
-                _add_edge(edge_map, right, left, 2.0)
+                _add_edge(edge_map, left, right, 0.65)
+                _add_edge(edge_map, right, left, 0.65)
+
+    for indices in buyer_groups.values():
+        indices.sort(key=lambda item: (examples[item].source_file, examples[item].row_index))
+        if len(indices) > 1:
+            for left, right in zip(indices, indices[1:]):
+                _add_edge(edge_map, left, right, 1.8)
+                _add_edge(edge_map, right, left, 1.8)
+
+    for indices in seller_groups.values():
+        indices.sort(key=lambda item: (examples[item].source_file, examples[item].row_index))
+        if len(indices) > 1:
+            for left, right in zip(indices, indices[1:]):
+                _add_edge(edge_map, left, right, 1.9)
+                _add_edge(edge_map, right, left, 1.9)
+
+    bridge_edges: dict[tuple[int, int], float] = {}
+    for indices in buyer_groups.values():
+        if len(indices) < 2:
+            continue
+        known_indices = [index for index in indices if examples[index].extension_role == "buyer_to_known_seller"]
+        candidate_indices = [
+            index
+            for index in indices
+            if examples[index].seller_account and examples[index].extension_role != "seller_anchor"
+        ]
+        for left in known_indices:
+            for right in candidate_indices:
+                if left == right:
+                    continue
+                bridge_edges[(left, right)] = max(bridge_edges.get((left, right), 0.0), 2.1)
+                bridge_edges[(right, left)] = max(bridge_edges.get((right, left), 0.0), 2.1)
+    for (left, right), weight in bridge_edges.items():
+        _add_edge(edge_map, left, right, weight)
 
     token_frequency = {token: len(indices) for token, indices in token_groups.items()}
     candidate_tokens = {token for token, freq in token_frequency.items() if 2 <= freq <= 40}
@@ -724,23 +760,115 @@ def _build_graph(rows: list[tuple[str, TrainingExample]]) -> tuple[torch.Tensor,
     return edge_index, edge_weight, node_keys
 
 
-def _stratified_split(label_indices: list[int], labels: torch.Tensor, seed: int, split_ratio: float) -> tuple[list[int], list[int]]:
+def _split_group_key(example: TrainingExample, workbook_path: str) -> str:
+    owner_id = str(example.owner_id or "").strip()
+    if owner_id:
+        return f"owner:{owner_id}"
+    subject_account = _normalize_text(example.subject_account)
+    if subject_account:
+        return f"subject_account:{subject_account}"
+    buyer_account = _normalize_text(example.buyer_account)
+    seller_account = _normalize_text(example.seller_account)
+    if buyer_account or seller_account:
+        return f"trade:{buyer_account}->{seller_account}"
+    return f"workbook:{workbook_path or '__unknown__'}"
+
+
+def _grouped_stratified_split(
+    label_indices: list[int],
+    labels: torch.Tensor,
+    examples: list[TrainingExample],
+    workbook_paths: list[str],
+    seed: int,
+    split_ratio: float,
+) -> tuple[list[int], list[int]]:
     rng = random.Random(seed)
-    positives = [index for index in label_indices if int(labels[index].item()) == 1]
-    negatives = [index for index in label_indices if int(labels[index].item()) == 0]
-    rng.shuffle(positives)
-    rng.shuffle(negatives)
+    grouped: dict[str, list[int]] = defaultdict(list)
+    for index in label_indices:
+        grouped[_split_group_key(examples[index], workbook_paths[index])].append(index)
 
-    def _split(indices: list[int]) -> tuple[list[int], list[int]]:
-        if len(indices) <= 1:
-            return list(indices), list(indices)
-        cutoff = max(1, min(len(indices) - 1, int(round(len(indices) * split_ratio))))
-        return indices[:cutoff], indices[cutoff:]
+    group_items: list[tuple[str, list[int], int, int]] = []
+    total_positive = total_negative = 0
+    for key, indices in grouped.items():
+        positives = sum(1 for index in indices if int(labels[index].item()) == 1)
+        negatives = sum(1 for index in indices if int(labels[index].item()) == 0)
+        total_positive += positives
+        total_negative += negatives
+        group_items.append((key, indices, positives, negatives))
 
-    train_pos, val_pos = _split(positives)
-    train_neg, val_neg = _split(negatives)
-    train = train_pos + train_neg
-    val = val_pos + val_neg
+    if len(group_items) <= 1:
+        return list(label_indices), list(label_indices)
+
+    rng.shuffle(group_items)
+    group_items.sort(key=lambda item: (max(item[2], item[3]), len(item[1])), reverse=True)
+    target_positive = max(1, int(round(total_positive * (1.0 - split_ratio)))) if total_positive > 1 else total_positive
+    target_negative = max(1, int(round(total_negative * (1.0 - split_ratio)))) if total_negative > 1 else total_negative
+
+    val_groups: list[tuple[str, list[int], int, int]] = []
+    train_groups: list[tuple[str, list[int], int, int]] = []
+    val_positive = val_negative = 0
+
+    for item in group_items:
+        _, _, positives, negatives = item
+        still_need_positive = val_positive < target_positive
+        still_need_negative = val_negative < target_negative
+        add_to_val = False
+        if still_need_positive and positives:
+            add_to_val = True
+        elif still_need_negative and negatives:
+            add_to_val = True
+        elif not val_groups:
+            add_to_val = True
+        if add_to_val:
+            val_groups.append(item)
+            val_positive += positives
+            val_negative += negatives
+        else:
+            train_groups.append(item)
+
+    if not train_groups:
+        train_groups.append(val_groups.pop())
+    if not val_groups:
+        val_groups.append(train_groups.pop())
+
+    def _flatten(items: list[tuple[str, list[int], int, int]]) -> list[int]:
+        return [index for _, indices, _, _ in items for index in indices]
+
+    train = _flatten(train_groups)
+    val = _flatten(val_groups)
+
+    train_positive = sum(1 for index in train if int(labels[index].item()) == 1)
+    train_negative = sum(1 for index in train if int(labels[index].item()) == 0)
+    val_positive = sum(1 for index in val if int(labels[index].item()) == 1)
+    val_negative = sum(1 for index in val if int(labels[index].item()) == 0)
+
+    def _move_group(
+        source: list[tuple[str, list[int], int, int]],
+        target: list[tuple[str, list[int], int, int]],
+        need_positive: bool,
+    ) -> bool:
+        for idx, item in enumerate(source):
+            positives = item[2]
+            negatives = item[3]
+            if need_positive and positives:
+                target.append(source.pop(idx))
+                return True
+            if not need_positive and negatives:
+                target.append(source.pop(idx))
+                return True
+        return False
+
+    if val_positive == 0 and total_positive > 0:
+        _move_group(train_groups, val_groups, need_positive=True)
+    if val_negative == 0 and total_negative > 0:
+        _move_group(train_groups, val_groups, need_positive=False)
+    if train_positive == 0 and total_positive > 0:
+        _move_group(val_groups, train_groups, need_positive=True)
+    if train_negative == 0 and total_negative > 0:
+        _move_group(val_groups, train_groups, need_positive=False)
+
+    train = _flatten(train_groups)
+    val = _flatten(val_groups)
     if not val:
         val = train[:]
     return train, val
@@ -1051,7 +1179,14 @@ class GraphRiskModel:
         labels = torch.tensor([1 if example.label_status == "positive" else 0 if example.label_status == "negative" else -1 for example in examples], dtype=torch.long)
         labeled_mask = labels >= 0
         labeled_indices = [index for index, flag in enumerate(labeled_mask.tolist()) if flag]
-        train_indices, val_indices = _stratified_split(labeled_indices, labels, self.seed, self.split_ratio)
+        train_indices, val_indices = _grouped_stratified_split(
+            labeled_indices,
+            labels,
+            examples,
+            workbook_paths=[source for source, _ in rows],
+            seed=self.seed,
+            split_ratio=self.split_ratio,
+        )
         train_mask = torch.zeros_like(labeled_mask)
         val_mask = torch.zeros_like(labeled_mask)
         if train_indices:
@@ -1059,7 +1194,6 @@ class GraphRiskModel:
         if val_indices:
             val_mask[val_indices] = True
         edge_index, edge_weight, node_keys = _build_graph(rows)
-        workbook_paths = [source for source, _ in rows]
         return GraphDataset(
             features=features,
             labels=labels,
@@ -1070,7 +1204,7 @@ class GraphRiskModel:
             edge_weight=edge_weight,
             examples=examples,
             node_keys=node_keys,
-            workbook_paths=workbook_paths,
+            workbook_paths=[source for source, _ in rows],
         )
 
     def fit(
@@ -1117,11 +1251,13 @@ class GraphRiskModel:
             if labeled_count == 0:
                 raise ValueError("no labeled examples available for graph training")
 
-            positive_count = int((dataset.labels == 1).sum().item())
-            negative_count = int((dataset.labels == 0).sum().item())
+            positive_count = int(((dataset.labels == 1) & dataset.train_mask).sum().item())
+            negative_count = int(((dataset.labels == 0) & dataset.train_mask).sum().item())
             self.model = RowGNNClassifier(dataset.features.size(1), hidden_dim=self.hidden_dim, dropout=self.dropout)
             optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=1e-4)
-            focal_loss = FocalLoss(alpha=negative_count / max(positive_count + negative_count, 1))
+            positive_ratio = positive_count / max(positive_count + negative_count, 1)
+            alpha = min(0.9, max(0.35, 1.0 - positive_ratio))
+            focal_loss = FocalLoss(alpha=alpha)
 
             best_state = None
             best_val_loss = float("inf")

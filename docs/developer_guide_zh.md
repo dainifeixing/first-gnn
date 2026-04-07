@@ -30,6 +30,7 @@
 因此扩展时建议遵守：
 
 - 不要跳过人工复核闭环
+- 不要把 `holdout_eval` 再并回训练
 - 不要把模型输出改成敏感属性或违法性质定性
 - 优先补数据稳定性、标签稳定性、阈值运营能力
 - 在没有必要前，不要引入重型图框架
@@ -89,6 +90,7 @@ src/txflow/
 
 - 从工作簿行中提取交易 ID、时间、金额、对手方、备注等字段
 - 用标签 manifest 给交易行打标签
+- 读取 `annotation_meta_by_id` 并优先保留 `extension_role / anchor_subject`
 - 构建训练样本与完整训练特征
 - 切分训练集和验证集
 
@@ -131,6 +133,14 @@ src/txflow/
 - 图模型训练
 - 模型保存、加载和评分
 
+当前实现重点已经从“只看行级高分”转向“扩线辅助”：
+
+- 弱化 `owner / workbook` 边权
+- 强化 `buyer / seller` 桥接边
+- 增加账号级 seller candidate 聚合
+- 支持冻结评估所需的 seller recovery 统计
+- 支持 `candidate_tier / bridge_uplift` 两层 seller 候选分层
+
 适合扩展的内容：
 
 - 更好的图节点/边特征
@@ -163,6 +173,10 @@ src/txflow/
 
 - 从工作簿构建标准化流水输出
 - 汇总训练和评分结果
+- 生成 `seller_candidates`
+- 生成 `candidate_tier`
+- 生成 `bridge_uplift`
+- 生成 `frozen_eval`
 - 构建多轮比较
 - 构建阈值扫描与负载预测
 - 生成决策摘要
@@ -184,6 +198,7 @@ src/txflow/
 - 构建标签索引
 - 人工复核 CSV 转 manifest
 - 多份 manifest 合并
+- 根据 `excluded_transaction_ids` 过滤训练 manifest
 
 适合扩展的内容：
 
@@ -202,6 +217,13 @@ src/txflow/
 3. 在 `main()` 中按 `args.command` 分发
 
 如果你新增命令，最好保持这种模式，不要把复杂业务逻辑直接堆在参数解析里。
+
+当前和闭环直接相关的命令已经包括：
+
+- `split-feedback-loop`
+- `run-extension-round`
+- `train-gnn --exclude-annotations`
+- `export-review-candidates --tier`
 
 ## 5. 数据对象设计
 
@@ -224,12 +246,27 @@ src/txflow/
 - `channel`
 - `remark`
 - `raw`
+- `extension_role`
+- `anchor_subject`
 
 扩展原则：
 
 - 尽量保持字段语义稳定
 - 新增字段优先追加，不要破坏现有字段
 - 改字段名会连带影响训练、导出、测试
+
+当前建议把 `TrainingExample` 看成三层语义载体：
+
+- 行级交易语义
+- 扩线角色语义
+- 图桥接语义
+
+但要注意：
+
+- `candidate_tier`
+- `bridge_uplift`
+
+这两个字段不是 `TrainingExample` 的字段，而是账号级 seller candidate 聚合后的运营层字段，主要在 `gnn_pipeline.py` 和可视化/导出链路里消费。
 
 ### 5.2 `LabelManifest`
 
@@ -254,9 +291,113 @@ manifest 是整个迭代闭环的核心约束对象。
 - 不要写入强依赖本机路径的数据
 - 如果加新字段，优先保持向后兼容
 
+注意：
+
+- `LabelManifest` 仍然是极性主对象
+- 更细的 `extension_role / anchor_subject` 现在主要保存在 annotation 层
+- 所以开发时不要再假设 manifest 足够表达全部扩线语义
+
 ### 5.3 `NormalizedTransaction`
 
 这是标准化导出的核心对象。
+
+## 6. 当前闭环约束
+
+现在项目已经不是“单轮训练 + 单轮 review”这么简单，而是有明确的数据分层约束：
+
+- `seed_train`
+  冷启动训练样本
+- `holdout_eval`
+  冻结评估样本
+- `feedback_pool`
+  新复核回流样本
+
+开发时必须遵守：
+
+- `holdout_eval` 不能参与训练
+- 同一个 `transaction_id` 不能同时出现在 train 和 holdout
+- 新功能如果会改写 round 报告，必须保留 `frozen_eval_summary`
+- 新评分导出如果只面向交易行，不能替代账号级 seller candidate 导出
+- seller review 默认应优先支持 `strong_bridge_unknown_seller`
+- 如果新增 seller 候选字段，必须同步：
+  - `scores.json`
+  - `seller_review.csv/xlsx/md`
+  - `round_viz.html`
+  - 相关 round summary / markdown
+
+## 7. 新增命令的设计意图
+
+### 7.1 `split-feedback-loop`
+
+目的：
+
+- 把单份人工标注切成可控闭环
+- 避免操作层手工拆分时出错
+
+### 7.2 `run-extension-round`
+
+现在这个命令不只是“训练 + 打分”。
+
+当前默认行为还包括：
+
+- seller review 导出默认走 `candidate_tier = strong_bridge_unknown_seller`
+- round 目录默认产出 `seller_review.csv / seller_review.xlsx / seller_review.md`
+- 设计目标是让人工复核直接从第一优先层开始，而不是再做二次筛选
+
+如果后续要改这个默认行为，必须同步：
+
+- `README.md`
+- `user_guide_zh.md`
+- `project_manual_zh.md`
+- `developer_guide_zh.md`
+
+输入：
+
+- 一份 `annotations.csv/jsonl/xlsx`
+
+输出：
+
+- `seed_train`
+- `holdout_eval`
+- `feedback_pool`
+
+### 7.2 `run-extension-round`
+
+目的：
+
+- 将“训练 + 评分 + 账号候选 + 冻结评估 + round report”固化成单条命令
+
+当前它做的事包括：
+
+- 构造实际训练 annotations
+- 生成 train manifest
+- 训练 GNN
+- 评分并导出 seller-account candidate 列表
+- 对 holdout 做冻结评估
+- 写 round report
+
+### 7.3 `train-gnn --exclude-annotations`
+
+目的：
+
+- 给旧命令补保险阀
+- 即使不走新闭环命令，也能显式排除 holdout
+
+## 8. 当前评估优先级
+
+开发时不要再默认 `best_val_f1` 是主指标。当前建议的优先顺序是：
+
+1. seller-account candidate 质量
+2. frozen holdout seller recovery
+3. buyer bridge 质量
+4. review workload / threshold 可运营性
+5. row-level validation F1
+
+这意味着：
+
+- 新特征或新模型如果只提高 F1，但让 seller candidate 更集中，不应默认算改进
+- 新报告如果只展示 row-level 排序，不够
+- 评估代码应优先保留账号级和路径级信息
 
 字段包括：
 

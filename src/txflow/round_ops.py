@@ -16,6 +16,7 @@ class RoundReport:
     round_name: str
     metrics: dict[str, Any]
     score_summary: dict[str, Any]
+    frozen_eval_summary: dict[str, Any]
     review_summary: dict[str, Any]
     label_summary: dict[str, Any]
 
@@ -24,6 +25,7 @@ class RoundReport:
             "round_name": self.round_name,
             "metrics": dict(self.metrics),
             "score_summary": dict(self.score_summary),
+            "frozen_eval_summary": dict(self.frozen_eval_summary),
             "review_summary": dict(self.review_summary),
             "label_summary": dict(self.label_summary),
         }
@@ -75,9 +77,11 @@ def _load_score_summary(score_json_path: str | Path | None) -> dict[str, Any]:
     summary = {
         "total_rows": 0,
         "top_rows": 0,
+        "seller_candidates": 0,
         "top_score": 0.0,
         "avg_top_score": 0.0,
         "top_workbook": "",
+        "top_seller_candidate": "",
     }
     if not score_json_path:
         return summary
@@ -87,14 +91,44 @@ def _load_score_summary(score_json_path: str | Path | None) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     top_rows = payload.get("top_rows", [])
     workbooks = payload.get("workbooks", [])
+    seller_candidates = payload.get("seller_candidates", [])
     summary["total_rows"] = int(payload.get("total_rows", 0))
     summary["top_rows"] = len(top_rows)
+    summary["seller_candidates"] = len(seller_candidates)
     if top_rows:
         scores = [float(item.get("score", 0.0)) for item in top_rows]
         summary["top_score"] = max(scores)
         summary["avg_top_score"] = mean(scores)
     if workbooks:
         summary["top_workbook"] = str(workbooks[0].get("path", ""))
+    if seller_candidates:
+        summary["top_seller_candidate"] = str(seller_candidates[0].get("seller_account", ""))
+    return summary
+
+
+def _load_frozen_eval_summary(frozen_eval_json_path: str | Path | None) -> dict[str, Any]:
+    summary = {
+        "total_rows": 0,
+        "positive_rows": 0,
+        "negative_rows": 0,
+        "f1": 0.0,
+        "seller_recovery_rate": 0.0,
+        "recovered_positive_sellers": 0,
+    }
+    if not frozen_eval_json_path:
+        return summary
+    path = Path(frozen_eval_json_path)
+    if not path.exists():
+        return summary
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    metrics = payload.get("metrics", {})
+    recovery = payload.get("seller_candidate_recovery", {})
+    summary["total_rows"] = int(payload.get("total_rows", 0))
+    summary["positive_rows"] = int(payload.get("positive_rows", 0))
+    summary["negative_rows"] = int(payload.get("negative_rows", 0))
+    summary["f1"] = float(metrics.get("f1", 0.0))
+    summary["seller_recovery_rate"] = float(recovery.get("recovery_rate", 0.0))
+    summary["recovered_positive_sellers"] = int(recovery.get("recovered_positive_sellers", 0))
     return summary
 
 
@@ -127,17 +161,20 @@ def build_round_report(
     round_name: str,
     metrics_json_path: str | Path,
     score_json_path: str | Path | None = None,
+    frozen_eval_json_path: str | Path | None = None,
     review_csv_path: str | Path | None = None,
     label_json_paths: list[str] | None = None,
 ) -> RoundReport:
     metrics = json.loads(Path(metrics_json_path).read_text(encoding="utf-8"))
     score_summary = _load_score_summary(score_json_path)
+    frozen_eval_summary = _load_frozen_eval_summary(frozen_eval_json_path)
     review_summary = load_review_stats(review_csv_path)
     label_summary = _load_label_summary(label_json_paths)
     return RoundReport(
         round_name=round_name,
         metrics=metrics,
         score_summary=score_summary,
+        frozen_eval_summary=frozen_eval_summary,
         review_summary=review_summary,
         label_summary=label_summary,
     )
@@ -161,9 +198,20 @@ def export_round_report_markdown(report: RoundReport, output_path: str | Path) -
     lines.append("")
     lines.append(f"- total_rows: {int(report.score_summary.get('total_rows', 0))}")
     lines.append(f"- top_rows: {int(report.score_summary.get('top_rows', 0))}")
+    lines.append(f"- seller_candidates: {int(report.score_summary.get('seller_candidates', 0))}")
     lines.append(f"- top_score: {float(report.score_summary.get('top_score', 0.0)):.4f}")
     lines.append(f"- avg_top_score: {float(report.score_summary.get('avg_top_score', 0.0)):.4f}")
     lines.append(f"- top_workbook: {report.score_summary.get('top_workbook', '')}")
+    lines.append(f"- top_seller_candidate: {report.score_summary.get('top_seller_candidate', '')}")
+    lines.append("")
+    lines.append("## Frozen Eval")
+    lines.append("")
+    lines.append(f"- total_rows: {int(report.frozen_eval_summary.get('total_rows', 0))}")
+    lines.append(f"- positive_rows: {int(report.frozen_eval_summary.get('positive_rows', 0))}")
+    lines.append(f"- negative_rows: {int(report.frozen_eval_summary.get('negative_rows', 0))}")
+    lines.append(f"- f1: {float(report.frozen_eval_summary.get('f1', 0.0)):.4f}")
+    lines.append(f"- seller_recovery_rate: {float(report.frozen_eval_summary.get('seller_recovery_rate', 0.0)):.4f}")
+    lines.append(f"- recovered_positive_sellers: {int(report.frozen_eval_summary.get('recovered_positive_sellers', 0))}")
     lines.append("")
     lines.append("## Review")
     lines.append("")
@@ -199,6 +247,10 @@ def bootstrap_round(
     output_dir = Path(base_dir) / round_name
     output_dir.mkdir(parents=True, exist_ok=True)
     files = {
+        "seed_train_csv": str(output_dir / "seed_train.csv"),
+        "holdout_eval_csv": str(output_dir / "holdout_eval.csv"),
+        "feedback_pool_csv": str(output_dir / "feedback_pool.csv"),
+        "train_annotations_csv": str(output_dir / "train_annotations.csv"),
         "normalized_csv": str(output_dir / "normalized.csv"),
         "normalized_jsonl": str(output_dir / "normalized.jsonl"),
         "graph_dataset_json": str(output_dir / "graph_dataset.json"),
@@ -207,8 +259,11 @@ def bootstrap_round(
         "metadata_json": str(output_dir / "metadata.json"),
         "scores_json": str(output_dir / "scores.json"),
         "scores_md": str(output_dir / "scores.md"),
-        "review_csv": str(output_dir / "review.csv"),
-        "review_md": str(output_dir / "review.md"),
+        "seller_review_csv": str(output_dir / "seller_review.csv"),
+        "seller_review_xlsx": str(output_dir / "seller_review.xlsx"),
+        "seller_review_md": str(output_dir / "seller_review.md"),
+        "frozen_eval_json": str(output_dir / "frozen_eval.json"),
+        "frozen_eval_md": str(output_dir / "frozen_eval.md"),
         "report_json": str(output_dir / "report.json"),
         "report_md": str(output_dir / "report.md"),
     }
@@ -231,12 +286,13 @@ def bootstrap_round(
         encoding="utf-8",
     )
     commands = [
-        f"python3 -m txflow.cli normalize-ledgers --root {train_root} --labels {label_glob} --csv {files['normalized_csv']} --jsonl {files['normalized_jsonl']}",
-        f"python3 -m txflow.cli build-graph-dataset --root {train_root} --labels {label_glob} --json {files['graph_dataset_json']}",
-        f"python3 -m txflow.cli train-gnn --root {train_root} --labels {label_glob} --model {files['model_pt']} --metrics {files['metrics_json']} --metadata {files['metadata_json']}",
-        f"python3 -m txflow.cli score-gnn --root {score_root} --model {files['model_pt']} --labels {label_glob} --json {files['scores_json']} --md {files['scores_md']} --top-k 200",
-        f"python3 -m txflow.cli export-review-candidates --scores {files['scores_json']} --csv {files['review_csv']} --md {files['review_md']} --threshold 0.75 --limit 100",
-        f"python3 -m txflow.cli make-round-report --round-name {round_name} --metrics {files['metrics_json']} --scores {files['scores_json']} --reviews {files['review_csv']} --md {files['report_md']} --json {files['report_json']}",
+        f"python3 -m txflow.cli split-feedback-loop --annotations YOUR_REVIEWED_ANNOTATIONS.csv --seed-train-csv {files['seed_train_csv']} --holdout-eval-csv {files['holdout_eval_csv']} --feedback-pool-csv {files['feedback_pool_csv']}",
+        (
+            f"python3 -m txflow.cli run-extension-round --round-name {round_name} "
+            f"--train-root {train_root} --score-root {score_root} "
+            f"--seed-annotations {files['seed_train_csv']} --holdout-annotations {files['holdout_eval_csv']} "
+            f"--feedback-annotations {files['feedback_pool_csv']} --output-dir {output_dir}"
+        ),
     ]
     return RoundBootstrap(
         round_name=round_name,
@@ -264,4 +320,3 @@ def export_round_bootstrap_markdown(bootstrap: RoundBootstrap, output_path: str 
     for command in bootstrap.commands:
         lines.append(f"- `{command}`")
     return write_markdown_lines(output_path, lines)
-

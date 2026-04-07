@@ -23,20 +23,25 @@
 - 只有人工确认的结果才应该回流训练
 - 每一轮都要保留独立目录，不覆盖上一轮结果
 
+新增一条现在必须记住：
+
+- `holdout_eval` 是冻结评估集，不能回流训练
+
 ## 3. 一轮工作流概览
 
 一轮标准流程如下：
 
-1. 准备工作簿目录和标签文件
-2. 标准化流水
+1. 准备工作簿目录和人工标注
+2. 拆分 `seed_train / holdout_eval / feedback_pool`
 3. 训练 GNN
 4. 对待评分目录打分
-5. 导出人工复核清单
+5. 导出账号级扩线候选榜
 6. 人工填写复核结果
 7. 导入复核结果为新标签
 8. 合并标签，准备下一轮
-9. 做阈值和负载分析
-10. 形成决策摘要
+9. 查看冻结评估和阈值/负载分析
+10. 打开最小可用可视化页面
+11. 形成决策摘要
 
 ## 4. 目录建议
 
@@ -45,6 +50,10 @@
 ```text
 out/
 └── round_01/
+    ├── seed_train.csv
+    ├── holdout_eval.csv
+    ├── feedback_pool.csv
+    ├── train_annotations.csv
     ├── normalized.csv
     ├── normalized.jsonl
     ├── graph_dataset.json
@@ -53,6 +62,12 @@ out/
     ├── metadata.json
     ├── scores.json
     ├── scores.md
+    ├── seller_review.csv
+    ├── seller_review.xlsx
+    ├── seller_review.md
+    ├── frozen_eval.json
+    ├── frozen_eval.md
+    ├── round_viz.html
     ├── review.csv
     ├── review.md
     ├── report.json
@@ -73,12 +88,13 @@ out/
 
 - 一个训练目录，里面放 `.xlsx` 工作簿
 - 一个评分目录，里面放待评分 `.xlsx`
-- 一组标签清单 `data/labels/*.json`
+- 一份或多份人工标注文件
 
 建议把人工确认后的标签分成：
 
-- 正例 manifest
-- 负例 manifest
+- `seed_train`
+- `holdout_eval`
+- `feedback_pool`
 
 ## 6. 第一步：创建轮次目录
 
@@ -100,6 +116,22 @@ python3 -m txflow.cli bootstrap-round \
 - 标准目录
 - 标准文件名
 - 一轮建议命令模板
+
+如果你已有统一人工标注，建议先拆分：
+
+```bash
+python3 -m txflow.cli split-feedback-loop \
+  --annotations data/annotations/reviewed.csv \
+  --seed-train-csv out/round_01/seed_train.csv \
+  --holdout-eval-csv out/round_01/holdout_eval.csv \
+  --feedback-pool-csv out/round_01/feedback_pool.csv
+```
+
+拆分后：
+
+- `seed_train` 用于首轮训练
+- `holdout_eval` 只用于评估
+- `feedback_pool` 用于逐轮并入
 
 ## 7. 第二步：标准化流水
 
@@ -148,15 +180,14 @@ python3 -m txflow.cli build-graph-dataset \
 命令：
 
 ```bash
-python3 -m txflow.cli train-gnn \
-  --root /path/to/train_workbooks \
-  --labels data/labels/*.json \
-  --model out/round_01/model.pt \
-  --metrics out/round_01/metrics.json \
-  --metadata out/round_01/metadata.json \
-  --epochs 120 \
-  --split-ratio 0.8 \
-  --seed 42
+python3 -m txflow.cli run-extension-round \
+  --round-name round_01 \
+  --train-root /path/to/train_workbooks \
+  --score-root /path/to/score_workbooks \
+  --seed-annotations out/round_01/seed_train.csv \
+  --holdout-annotations out/round_01/holdout_eval.csv \
+  --feedback-annotations out/round_01/feedback_pool.csv \
+  --output-dir out/round_01
 ```
 
 训练后优先看：
@@ -166,12 +197,69 @@ python3 -m txflow.cli train-gnn \
 - `positive_rate`
 - `train_nodes`
 - `val_nodes`
+- `frozen_eval.f1`
+- `seller_candidate_recovery.recovery_rate`
+
+现在建议额外关注：
+
+- `strong_bridge_candidates`
+- `weak_bridge_candidates`
+- `avg_bridge_uplift`
 
 使用建议：
 
 - 第一轮先别急着开伪标签
 - 正负样本数量太少时，先补标签再训
 - 每轮模型单独保存，别覆盖旧模型
+- 不要把 `holdout_eval` 再喂回训练
+
+如果你要快速看“账号候选 + buyer bridge + 冻结评估”，直接生成一个最小可用页面：
+
+```bash
+python3 -m txflow.cli visualize-round \
+  --scores out/round_01/scores.json \
+  --report out/round_01/report.json \
+  --frozen-eval out/round_01/frozen_eval.json \
+  --reviews out/round_01/seller_review.csv \
+  --html out/round_01/round_viz.html \
+  --title "round_01 visual review"
+```
+
+如果你还想把多轮指标直接塞进同一页，不用先手工做 `comparison.json`，可以直接追加：
+
+```bash
+python3 -m txflow.cli visualize-round \
+  --scores out/round_10/scores.json \
+  --report out/round_10/report.json \
+  --frozen-eval out/round_10/frozen_eval.json \
+  --compare-round round_08:out/round_08/metrics.json \
+  --compare-round round_09:out/round_09/metrics.json \
+  --compare-round round_10:out/round_10/metrics.json \
+  --html out/round_10/round_viz.html
+```
+
+这页最适合三件事：
+
+- 先看 `seller candidates` 谁最值得查
+- 再看 `buyer -> seller` 桥接关系是否成立
+- 最后看 `frozen eval` 是否真的变好
+
+现在推荐的看法顺序是：
+
+- 先点 `Strong Bridge`
+- 优先复核 `strong_bridge_unknown_seller`
+- 第一优先层看完，再切到 `Weak Bridge`
+
+如果你暂时还要手工使用旧命令，至少这样写：
+
+```bash
+python3 -m txflow.cli train-gnn \
+  --root /path/to/train_workbooks \
+  --annotations out/round_01/seed_train.csv \
+  --exclude-annotations out/round_01/holdout_eval.csv \
+  --model out/round_01/model.pt \
+  --metrics out/round_01/metrics.json
+```
 
 ## 10. 第五步：评分
 
@@ -190,9 +278,11 @@ python3 -m txflow.cli score-gnn \
 你需要重点看：
 
 - Top-k 高分记录
+- `seller_candidates`
 - 哪些工作簿的最高分明显更高
 - 带 `review_flags` 的记录是否同时高分
 - 已标注数据是否被高分重复打出来
+- 哪些 seller 账号被多个 buyer 共同指向
 
 ## 11. 第六步：导出人工复核清单
 
@@ -201,11 +291,16 @@ python3 -m txflow.cli score-gnn \
 ```bash
 python3 -m txflow.cli export-review-candidates \
   --scores out/round_01/scores.json \
-  --csv out/round_01/review.csv \
-  --md out/round_01/review.md \
+  --csv out/round_01/seller_review.csv \
+  --xlsx out/round_01/seller_review.xlsx \
+  --md out/round_01/seller_review.md \
   --threshold 0.75 \
-  --limit 100
+  --limit 100 \
+  --entity-type seller_account \
+  --tier strong_bridge_unknown_seller
 ```
+
+这也是当前推荐的默认人工复核入口。`run-extension-round` 默认 seller review 导出就会按这个 tier 过滤。
 
 推荐复核状态只用三种：
 
@@ -217,20 +312,34 @@ python3 -m txflow.cli export-review-candidates \
 
 - 只有前两种才能进下一轮训练
 - `uncertain` 不要直接回流训练
+- 优先复核账号级候选，而不是先盯着单条高分交易
+- 优先复核 `strong_bridge_unknown_seller`
+- `weak_bridge_high_score` 放在第二批次
+
+现在 seller 候选里最重要的字段是：
+
+- `candidate_tier`
+- `bridge_uplift`
+- `bridge_buyers`
+- `bridge_support_ratio`
+- `known_buyer_support`
 
 ## 12. 第七步：人工复核怎么填
 
 你需要打开：
 
-- `out/round_01/review.csv`
+- `out/round_01/seller_review.csv`
+- 或 `out/round_01/seller_review.xlsx`
 
-然后给每条记录填写 `review_label`。
+然后给每个候选账号填写 `review_label`。
 
 建议你同时补充：
 
 - 简短复核备注
 - 是否需要二次复查
 - 是否需要保留样本做误报分析
+- 如已知，补上 `extension_role`
+- 如已知，补上 `anchor_subject`
 
 ## 13. 第八步：导入复核结果为新标签
 
@@ -250,6 +359,14 @@ python3 -m txflow.cli import-review-labels \
 
 - 一份新的正例 manifest
 - 一份新的负例 manifest
+
+如果你同时导出了 `annotations.csv/jsonl`，建议优先保留这些字段：
+
+- `transaction_id`
+- `label`
+- `extension_role`
+- `anchor_subject`
+- `note`
 
 ## 14. 第九步：合并标签
 

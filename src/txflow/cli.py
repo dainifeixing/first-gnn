@@ -8,10 +8,14 @@ from pathlib import Path
 from .analysis import analyze_transactions_from_path
 from .annotations import (
     AnnotationRow,
+    build_annotation_manifests_from_rows,
     build_review_annotations,
     export_annotations_csv,
     export_annotations_jsonl,
+    load_annotation_rows,
     load_annotation_manifests,
+    merge_annotation_rows,
+    split_annotation_rows,
 )
 from .catalog import export_label_catalog_json, export_label_catalog_markdown
 from .gnn_pipeline import (
@@ -26,6 +30,8 @@ from .gnn_pipeline import (
     export_gnn_score_json,
     export_gnn_score_markdown,
     export_graph_dataset_summary,
+    export_frozen_eval_json,
+    export_frozen_eval_markdown,
     export_round_bootstrap_json,
     export_round_bootstrap_markdown,
     export_round_report_json,
@@ -42,6 +48,7 @@ from .gnn_pipeline import (
     export_owner_summary_csv,
     export_owner_summary_json,
     export_review_candidates,
+    build_frozen_eval_report,
     build_owner_review_roles,
     build_owner_review_rows,
     review_workload_forecast,
@@ -53,7 +60,7 @@ from .gnn_pipeline import (
     train_gnn_model,
 )
 from .graph_risk import export_graph_triage_json, export_graph_triage_markdown, score_directory
-from .labels import build_review_manifest, export_label_manifest, load_label_manifests, merge_label_manifests
+from .labels import LabelManifest, build_review_manifest, export_label_manifest, filter_label_manifests, load_label_manifests, merge_label_manifests
 from .model import BaselineTextClassifier, train_baseline_classifier
 from .pdf_ingest import export_wechat_pdf_rows_csv, export_wechat_pdf_rows_jsonl, load_wechat_pdf_rows_from_path
 from .roles import export_role_annotations_csv, export_role_annotations_jsonl
@@ -92,6 +99,7 @@ from .training import (
 )
 from .report import render_json_report, render_markdown_report
 from .triage import export_triage_json, export_triage_markdown, scan_workbook_directory
+from .visualization import export_round_visualization_html
 
 
 def _existing_file(path: str | Path, label: str) -> Path:
@@ -127,16 +135,43 @@ def _positive_int(value: int, label: str) -> None:
         raise ValueError(f"{label} must be greater than 0")
 
 
-def _resolve_manifests(labels: list[str] | None = None, annotations: str | None = None, require_input: bool = True):
+def _resolve_manifests(
+    labels: list[str] | None = None,
+    annotations: str | None = None,
+    require_input: bool = True,
+    exclude_annotations: list[str] | None = None,
+) -> list[LabelManifest]:
     label_paths = list(labels or [])
+    manifests: list[LabelManifest]
     if annotations:
         _existing_file(annotations, "annotations file")
-        return load_annotation_manifests(annotations)
-    if label_paths:
-        return load_label_manifests(label_paths)
-    if require_input:
+        manifests = load_annotation_manifests(annotations)
+    elif label_paths:
+        manifests = load_label_manifests(label_paths)
+    elif require_input:
         raise ValueError("provide either --labels or --annotations")
-    return []
+    else:
+        manifests = []
+    excluded_ids: set[str] = set()
+    for path in exclude_annotations or []:
+        _existing_file(path, "exclude annotations file")
+        excluded_ids.update(row.transaction_id for row in load_annotation_rows(path))
+    filtered, removed_count = filter_label_manifests(manifests, excluded_ids)
+    if excluded_ids and not filtered:
+        raise ValueError("all training labels were excluded by --exclude-annotations")
+    if removed_count and require_input and not filtered:
+        raise ValueError("no training labels remain after applying exclusions")
+    return filtered
+
+
+def _annotation_meta(rows: list[AnnotationRow]) -> dict[str, dict[str, str]]:
+    return {
+        row.transaction_id: {
+            "extension_role": row.extension_role,
+            "anchor_subject": row.anchor_subject,
+        }
+        for row in rows
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -294,6 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_gnn_parser.add_argument("--root", required=True, help="Directory containing xlsx files")
     train_gnn_parser.add_argument("--labels", nargs="*", default=[], help="Label manifest JSON files")
     train_gnn_parser.add_argument("--annotations", help="Simplified annotation file (.csv or .jsonl)")
+    train_gnn_parser.add_argument("--exclude-annotations", nargs="*", default=[], help="Annotation files to exclude from training, such as frozen holdout labels")
     train_gnn_parser.add_argument("--roles", help="Optional role annotation file (.csv or .jsonl)")
     train_gnn_parser.add_argument("--owners", help="Optional owner annotation file (.csv or .jsonl)")
     train_gnn_parser.add_argument("--model", required=True, help="Output torch model file")
@@ -335,6 +371,65 @@ def build_parser() -> argparse.ArgumentParser:
         default="transaction",
         help="Export transaction rows or aggregated seller-account candidates",
     )
+    review_parser.add_argument(
+        "--tier",
+        choices=[
+            "strong_bridge_unknown_seller",
+            "weak_bridge_high_score",
+            "high_support_non_bridge",
+            "score_only",
+        ],
+        help="Optional seller candidate tier filter; only applies to seller_account exports",
+    )
+
+    split_feedback_parser = subparsers.add_parser("split-feedback-loop", help="Split reviewed annotations into seed train, frozen holdout, and feedback pool")
+    split_feedback_parser.add_argument("--annotations", required=True, help="Reviewed annotation file (.csv, .jsonl, or .xlsx)")
+    split_feedback_parser.add_argument("--seed-train-csv", required=True, help="Output CSV for seed_train annotations")
+    split_feedback_parser.add_argument("--holdout-eval-csv", required=True, help="Output CSV for holdout_eval annotations")
+    split_feedback_parser.add_argument("--feedback-pool-csv", required=True, help="Output CSV for feedback_pool annotations")
+    split_feedback_parser.add_argument("--seed-train-jsonl", help="Optional JSONL for seed_train annotations")
+    split_feedback_parser.add_argument("--holdout-eval-jsonl", help="Optional JSONL for holdout_eval annotations")
+    split_feedback_parser.add_argument("--feedback-pool-jsonl", help="Optional JSONL for feedback_pool annotations")
+    split_feedback_parser.add_argument("--seed-ratio", type=float, default=0.7, help="Share allocated to seed_train")
+    split_feedback_parser.add_argument("--holdout-ratio", type=float, default=0.2, help="Share allocated to holdout_eval")
+    split_feedback_parser.add_argument("--feedback-ratio", type=float, default=0.1, help="Share allocated to feedback_pool")
+    split_feedback_parser.add_argument("--seed", type=int, default=42, help="Random seed for deterministic splitting")
+
+    extension_round_parser = subparsers.add_parser("run-extension-round", help="Run one closed-loop GNN round with frozen holdout evaluation")
+    extension_round_parser.add_argument("--round-name", required=True, help="Round name")
+    extension_round_parser.add_argument("--train-root", required=True, help="Directory containing training workbooks")
+    extension_round_parser.add_argument("--score-root", required=True, help="Directory containing workbooks to score for extension candidates")
+    extension_round_parser.add_argument("--eval-root", help="Optional root for frozen holdout evaluation; defaults to train-root")
+    extension_round_parser.add_argument("--seed-annotations", required=True, help="Seed training annotations file")
+    extension_round_parser.add_argument("--holdout-annotations", required=True, help="Frozen holdout annotations file")
+    extension_round_parser.add_argument("--feedback-annotations", nargs="*", default=[], help="Optional reviewed feedback annotation files")
+    extension_round_parser.add_argument("--roles", help="Optional role annotation file (.csv or .jsonl)")
+    extension_round_parser.add_argument("--owners", help="Optional owner annotation file (.csv or .jsonl)")
+    extension_round_parser.add_argument("--output-dir", required=True, help="Output directory for this round")
+    extension_round_parser.add_argument("--hidden-dim", type=int, default=64, help="Hidden dimension")
+    extension_round_parser.add_argument("--dropout", type=float, default=0.25, help="Dropout ratio")
+    extension_round_parser.add_argument("--epochs", type=int, default=120, help="Training epochs")
+    extension_round_parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    extension_round_parser.add_argument("--split-ratio", type=float, default=0.8, help="Training split ratio")
+    extension_round_parser.add_argument("--synthetic-warmup", type=int, default=0, help="Synthetic warmup pairs")
+    extension_round_parser.add_argument("--self-train-rounds", type=int, default=0, help="Pseudo-label self-training rounds")
+    extension_round_parser.add_argument("--pseudo-positive-threshold", type=float, default=0.9, help="Pseudo-label positive threshold")
+    extension_round_parser.add_argument("--pseudo-negative-threshold", type=float, default=0.1, help="Pseudo-label negative threshold")
+    extension_round_parser.add_argument("--pseudo-max-rows", type=int, default=500, help="Max pseudo-labeled rows per run")
+    extension_round_parser.add_argument("--top-k", type=int, default=200, help="Top rows and seller candidates to keep in score output")
+    extension_round_parser.add_argument("--candidate-threshold", type=float, default=0.75, help="Minimum seller-account candidate score")
+    extension_round_parser.add_argument("--candidate-limit", type=int, default=100, help="Max seller-account candidates to export")
+    extension_round_parser.add_argument(
+        "--candidate-tier",
+        choices=[
+            "strong_bridge_unknown_seller",
+            "weak_bridge_high_score",
+            "high_support_non_bridge",
+            "score_only",
+        ],
+        default="strong_bridge_unknown_seller",
+        help="Optional seller-account candidate tier filter for round review exports",
+    )
 
     import_review_parser = subparsers.add_parser("import-review-labels", help="Convert manual review CSV or XLSX results into label manifests")
     import_review_parser.add_argument("--reviews", required=True, help="Reviewed CSV or XLSX file")
@@ -370,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     round_report_parser.add_argument("--round-name", required=True, help="Round name")
     round_report_parser.add_argument("--metrics", required=True, help="Metrics JSON file")
     round_report_parser.add_argument("--scores", help="Score JSON file")
+    round_report_parser.add_argument("--frozen-eval", help="Frozen eval JSON file")
     round_report_parser.add_argument("--reviews", help="Review CSV file")
     round_report_parser.add_argument("--labels", nargs="*", default=[], help="Optional label manifest JSON files")
     round_report_parser.add_argument("--json", help="Output JSON report")
@@ -426,6 +522,24 @@ def build_parser() -> argparse.ArgumentParser:
     decision_parser.add_argument("--min-candidates", type=int, default=1, help="Minimum acceptable candidate count")
     decision_parser.add_argument("--json", help="Output JSON decision sheet")
     decision_parser.add_argument("--md", help="Output Markdown decision sheet")
+
+    visualize_parser = subparsers.add_parser("visualize-round", help="Build a minimal self-contained HTML visualization for one round")
+    visualize_parser.add_argument("--scores", required=True, help="Score JSON file")
+    visualize_parser.add_argument("--html", required=True, help="Output HTML file")
+    visualize_parser.add_argument("--report", help="Optional round report JSON file")
+    visualize_parser.add_argument("--frozen-eval", help="Optional frozen eval JSON file")
+    visualize_parser.add_argument("--comparison", help="Optional round comparison JSON file")
+    visualize_parser.add_argument("--reviews", help="Optional seller review CSV or XLSX file")
+    visualize_parser.add_argument(
+        "--compare-round",
+        dest="compare_rounds",
+        action="append",
+        help="Optional inline round spec in the form round_name:metrics_json[:review_csv]",
+    )
+    visualize_parser.add_argument("--title", help="Optional page title")
+    visualize_parser.add_argument("--max-candidates", type=int, default=20, help="Max seller candidates to render")
+    visualize_parser.add_argument("--max-support-rows", type=int, default=8, help="Max supporting rows per seller candidate")
+    visualize_parser.add_argument("--max-top-rows", type=int, default=60, help="Max top rows to show in the global table")
 
     return parser
 
@@ -810,7 +924,11 @@ def run_train_gnn(args: argparse.Namespace) -> str:
     _probability(args.pseudo_positive_threshold, "pseudo-positive-threshold")
     _probability(args.pseudo_negative_threshold, "pseudo-negative-threshold")
     _positive_int(args.epochs, "epochs")
-    manifests = _resolve_manifests(args.labels, args.annotations)
+    excluded_ids: set[str] = set()
+    for path in args.exclude_annotations:
+        _existing_file(path, "exclude annotations file")
+        excluded_ids.update(row.transaction_id for row in load_annotation_rows(path))
+    manifests = _resolve_manifests(args.labels, args.annotations, exclude_annotations=args.exclude_annotations)
     metrics = train_gnn_model(
         args.root,
         manifests,
@@ -830,7 +948,8 @@ def run_train_gnn(args: argparse.Namespace) -> str:
         role_annotation_path=args.roles,
         owner_annotation_path=args.owners,
     )
-    return f"trained gnn model; best_val_f1={float(metrics.get('best_val_f1', 0.0)):.4f}"
+    excluded_suffix = f"; excluded_ids={len(excluded_ids)}" if excluded_ids else ""
+    return f"trained gnn model; best_val_f1={float(metrics.get('best_val_f1', 0.0)):.4f}{excluded_suffix}"
 
 
 def run_score_gnn(args: argparse.Namespace) -> str:
@@ -858,6 +977,8 @@ def run_export_review_candidates(args: argparse.Namespace) -> str:
     _existing_file(args.scores, "scores file")
     _probability(args.threshold, "threshold")
     _positive_int(args.limit, "limit")
+    if args.tier and args.entity_type != "seller_account":
+        raise ValueError("--tier only applies when --entity-type seller_account")
     rows = export_review_candidates(
         args.scores,
         csv_path=args.csv,
@@ -866,8 +987,173 @@ def run_export_review_candidates(args: argparse.Namespace) -> str:
         threshold=args.threshold,
         limit=args.limit,
         entity_type=args.entity_type,
+        tier=args.tier or "",
     )
     return f"exported {len(rows)} review candidates"
+
+
+def run_split_feedback_loop(args: argparse.Namespace) -> str:
+    _existing_file(args.annotations, "annotations file")
+    _probability(args.seed_ratio, "seed-ratio")
+    _probability(args.holdout_ratio, "holdout-ratio")
+    _probability(args.feedback_ratio, "feedback-ratio")
+    if (args.seed_ratio + args.holdout_ratio + args.feedback_ratio) > 1.0 + 1e-9:
+        raise ValueError("seed-ratio + holdout-ratio + feedback-ratio must be <= 1")
+    rows = load_annotation_rows(args.annotations)
+    splits = split_annotation_rows(
+        rows,
+        seed_ratio=args.seed_ratio,
+        holdout_ratio=args.holdout_ratio,
+        feedback_ratio=args.feedback_ratio,
+        seed=args.seed,
+    )
+    export_annotations_csv(splits["seed_train"], args.seed_train_csv)
+    export_annotations_csv(splits["holdout_eval"], args.holdout_eval_csv)
+    export_annotations_csv(splits["feedback_pool"], args.feedback_pool_csv)
+    if args.seed_train_jsonl:
+        export_annotations_jsonl(splits["seed_train"], args.seed_train_jsonl)
+    if args.holdout_eval_jsonl:
+        export_annotations_jsonl(splits["holdout_eval"], args.holdout_eval_jsonl)
+    if args.feedback_pool_jsonl:
+        export_annotations_jsonl(splits["feedback_pool"], args.feedback_pool_jsonl)
+    return (
+        f"split annotations into seed_train={len(splits['seed_train'])}, "
+        f"holdout_eval={len(splits['holdout_eval'])}, feedback_pool={len(splits['feedback_pool'])}"
+    )
+
+
+def run_extension_round(args: argparse.Namespace) -> str:
+    _existing_directory(args.train_root, "train root")
+    _existing_directory(args.score_root, "score root")
+    _existing_file(args.seed_annotations, "seed annotations")
+    _existing_file(args.holdout_annotations, "holdout annotations")
+    eval_root = args.eval_root or args.train_root
+    _existing_directory(eval_root, "eval root")
+    _ratio_between_zero_and_one(args.split_ratio, "split-ratio")
+    _probability(args.dropout, "dropout")
+    _probability(args.pseudo_positive_threshold, "pseudo-positive-threshold")
+    _probability(args.pseudo_negative_threshold, "pseudo-negative-threshold")
+    _probability(args.candidate_threshold, "candidate-threshold")
+    _positive_int(args.epochs, "epochs")
+    _positive_int(args.top_k, "top-k")
+    _positive_int(args.candidate_limit, "candidate-limit")
+
+    seed_rows = load_annotation_rows(args.seed_annotations)
+    holdout_rows = load_annotation_rows(args.holdout_annotations)
+    feedback_groups = [load_annotation_rows(path) for path in args.feedback_annotations]
+    train_rows = merge_annotation_rows([seed_rows, *feedback_groups])
+    holdout_rows = merge_annotation_rows([holdout_rows])
+    overlap = {row.transaction_id for row in train_rows} & {row.transaction_id for row in holdout_rows}
+    if overlap:
+        preview = ", ".join(sorted(overlap)[:10])
+        raise ValueError(f"holdout annotations overlap with train annotations: {preview}")
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    train_annotations_csv = output_dir / "train_annotations.csv"
+    train_annotations_jsonl = output_dir / "train_annotations.jsonl"
+    holdout_annotations_csv = output_dir / "holdout_eval.csv"
+    holdout_annotations_jsonl = output_dir / "holdout_eval.jsonl"
+    train_positive_json = output_dir / "train_positive.json"
+    train_negative_json = output_dir / "train_negative.json"
+    model_path = output_dir / "model.pt"
+    metrics_path = output_dir / "metrics.json"
+    metadata_path = output_dir / "metadata.json"
+    scores_json = output_dir / "scores.json"
+    scores_md = output_dir / "scores.md"
+    seller_review_csv = output_dir / "seller_review.csv"
+    seller_review_xlsx = output_dir / "seller_review.xlsx"
+    seller_review_md = output_dir / "seller_review.md"
+    frozen_eval_json = output_dir / "frozen_eval.json"
+    frozen_eval_md = output_dir / "frozen_eval.md"
+    report_json = output_dir / "report.json"
+    report_md = output_dir / "report.md"
+
+    export_annotations_csv(train_rows, train_annotations_csv)
+    export_annotations_jsonl(train_rows, train_annotations_jsonl)
+    export_annotations_csv(holdout_rows, holdout_annotations_csv)
+    export_annotations_jsonl(holdout_rows, holdout_annotations_jsonl)
+
+    train_manifests = build_annotation_manifests_from_rows(
+        train_rows,
+        dataset_name=f"{args.round_name}_train",
+        source_file=str(train_annotations_csv),
+    )
+    train_manifest_paths: list[str] = []
+    for manifest in train_manifests:
+        if manifest.polarity == "positive":
+            export_label_manifest(manifest, train_positive_json)
+            train_manifest_paths.append(str(train_positive_json))
+        elif manifest.polarity == "negative":
+            export_label_manifest(manifest, train_negative_json)
+            train_manifest_paths.append(str(train_negative_json))
+
+    metrics = train_gnn_model(
+        args.train_root,
+        train_manifests,
+        model_path=model_path,
+        metrics_path=metrics_path,
+        metadata_path=metadata_path,
+        hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
+        epochs=args.epochs,
+        seed=args.seed,
+        split_ratio=args.split_ratio,
+        synthetic_warmup=args.synthetic_warmup,
+        self_training_rounds=args.self_train_rounds,
+        pseudo_positive_threshold=args.pseudo_positive_threshold,
+        pseudo_negative_threshold=args.pseudo_negative_threshold,
+        pseudo_max_rows=args.pseudo_max_rows,
+        role_annotation_path=args.roles,
+        owner_annotation_path=args.owners,
+        annotation_meta_by_id=_annotation_meta(train_rows),
+    )
+    score_report = score_gnn_directory(
+        args.score_root,
+        model_path=model_path,
+        manifests=[],
+        top_k=args.top_k,
+        include_labeled=False,
+        role_annotation_path=args.roles,
+        owner_annotation_path=args.owners,
+    )
+    export_gnn_score_json(score_report, scores_json)
+    export_gnn_score_markdown(score_report, scores_md)
+    export_review_candidates(
+        scores_json,
+        csv_path=seller_review_csv,
+        xlsx_path=seller_review_xlsx,
+        md_path=seller_review_md,
+        threshold=args.candidate_threshold,
+        limit=args.candidate_limit,
+        entity_type="seller_account",
+        tier=args.candidate_tier,
+    )
+    frozen_eval_report = build_frozen_eval_report(
+        eval_root,
+        model_path=model_path,
+        holdout_rows=holdout_rows,
+        seller_candidates=score_report.seller_candidates,
+        role_annotation_path=args.roles,
+        owner_annotation_path=args.owners,
+    )
+    export_frozen_eval_json(frozen_eval_report, frozen_eval_json)
+    export_frozen_eval_markdown(frozen_eval_report, frozen_eval_md)
+    round_report = build_round_report(
+        round_name=args.round_name,
+        metrics_json_path=metrics_path,
+        score_json_path=scores_json,
+        frozen_eval_json_path=frozen_eval_json,
+        label_json_paths=train_manifest_paths,
+    )
+    export_round_report_json(round_report, report_json)
+    export_round_report_markdown(round_report, report_md)
+    return (
+        f"ran extension round {args.round_name}; "
+        f"train_rows={len(train_rows)}; holdout_rows={len(holdout_rows)}; "
+        f"seller_candidates={len(score_report.seller_candidates)}; "
+        f"frozen_eval_f1={float(frozen_eval_report.metrics.get('f1', 0.0)):.4f}"
+    )
 
 
 def run_import_review_labels(args: argparse.Namespace) -> str:
@@ -927,8 +1213,18 @@ def run_merge_label_manifests(args: argparse.Namespace) -> str:
 
 
 def run_compare_round_metrics(args: argparse.Namespace) -> str:
+    round_specs = _parse_round_specs(args.rounds)
+    report = compare_round_metrics(round_specs)
+    if args.json:
+        export_round_comparison_json(report, args.json)
+    if args.md:
+        export_round_comparison_markdown(report, args.md)
+    return f"compared {len(report.rounds)} rounds"
+
+
+def _parse_round_specs(items: list[str]) -> list[dict[str, str]]:
     round_specs: list[dict[str, str]] = []
-    for item in args.rounds:
+    for item in items:
         parts = item.split(":")
         if len(parts) < 2 or len(parts) > 3:
             raise ValueError(f"invalid round spec: {item}")
@@ -938,24 +1234,22 @@ def run_compare_round_metrics(args: argparse.Namespace) -> str:
             _existing_file(parts[2], "review file")
             spec["reviews"] = parts[2]
         round_specs.append(spec)
-    report = compare_round_metrics(round_specs)
-    if args.json:
-        export_round_comparison_json(report, args.json)
-    if args.md:
-        export_round_comparison_markdown(report, args.md)
-    return f"compared {len(report.rounds)} rounds"
+    return round_specs
 
 
 def run_make_round_report(args: argparse.Namespace) -> str:
     _existing_file(args.metrics, "metrics file")
     if args.scores:
         _existing_file(args.scores, "scores file")
+    if args.frozen_eval:
+        _existing_file(args.frozen_eval, "frozen eval file")
     if args.reviews:
         _existing_file(args.reviews, "reviews file")
     report = build_round_report(
         round_name=args.round_name,
         metrics_json_path=args.metrics,
         score_json_path=args.scores,
+        frozen_eval_json_path=args.frozen_eval,
         review_csv_path=args.reviews,
         label_json_paths=args.labels,
     )
@@ -1088,6 +1382,38 @@ def run_round_decision_sheet(args: argparse.Namespace) -> str:
     return f"built decision sheet for {args.round_name}"
 
 
+def run_visualize_round(args: argparse.Namespace) -> str:
+    _existing_file(args.scores, "scores file")
+    if args.report:
+        _existing_file(args.report, "report file")
+    if args.frozen_eval:
+        _existing_file(args.frozen_eval, "frozen eval file")
+    if args.comparison:
+        _existing_file(args.comparison, "comparison file")
+    if args.reviews:
+        _existing_file(args.reviews, "reviews file")
+    comparison_payload = None
+    if args.compare_rounds:
+        comparison_payload = compare_round_metrics(_parse_round_specs(args.compare_rounds)).to_dict()
+    _positive_int(args.max_candidates, "max-candidates")
+    _positive_int(args.max_support_rows, "max-support-rows")
+    _positive_int(args.max_top_rows, "max-top-rows")
+    export_round_visualization_html(
+        args.html,
+        score_json_path=args.scores,
+        report_json_path=args.report,
+        frozen_eval_json_path=args.frozen_eval,
+        comparison_json_path=args.comparison,
+        comparison_payload=comparison_payload,
+        reviews_path=args.reviews,
+        title=args.title,
+        max_candidates=args.max_candidates,
+        max_support_rows=args.max_support_rows,
+        max_top_rows=args.max_top_rows,
+    )
+    return f"built round visualization at {args.html}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1139,6 +1465,10 @@ def main(argv: list[str] | None = None) -> int:
             content = run_score_gnn(args)
         elif args.command == "export-review-candidates":
             content = run_export_review_candidates(args)
+        elif args.command == "split-feedback-loop":
+            content = run_split_feedback_loop(args)
+        elif args.command == "run-extension-round":
+            content = run_extension_round(args)
         elif args.command == "import-review-labels":
             content = run_import_review_labels(args)
         elif args.command == "merge-label-manifests":
@@ -1157,6 +1487,8 @@ def main(argv: list[str] | None = None) -> int:
             content = run_select_operating_threshold(args)
         elif args.command == "round-decision-sheet":
             content = run_round_decision_sheet(args)
+        elif args.command == "visualize-round":
+            content = run_visualize_round(args)
         else:
             parser.error(f"unsupported command: {args.command}")
             return 2

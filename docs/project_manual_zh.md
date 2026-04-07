@@ -38,12 +38,16 @@
 当前仓库已经具备以下能力：
 
 - CSV 规则分析与 Markdown/JSON 报告输出
+- 微信/支付宝 PDF 明细解析，并可导出标准化流水与轻量标注
 - 从 Excel 工作簿导出训练样本和完整数据集
 - 标签清单汇总与训练集切分
 - 轻量基线模型训练
 - 图传播筛查和轻量 GNN 训练、评分
 - 评分结果导出为人工复核清单
+- 评分结果按 `candidate_tier` 分层导出，优先支持 `strong_bridge_unknown_seller`
 - 将人工复核结果回流为下一轮训练标签
+- 将人工标注自动拆分为 `seed_train / holdout_eval / feedback_pool`
+- 按闭环约束运行扩线轮次，并单独输出账号级候选榜和冻结评估报告
 - 合并多轮标签清单
 - 比较多轮训练与复核效果
 - 生成单轮报告、阈值扫描、复核负载预测、工作阈值推荐和决策摘要
@@ -94,6 +98,7 @@
 主要命令：
 
 - `analyze`
+- `extract-payment-pdf`
 - `export-training`
 - `export-dataset`
 - `normalize-ledgers`
@@ -104,6 +109,8 @@
 主要产物：
 
 - 内部全量标准化流水表
+- PDF 提取后的标准化流水 CSV/JSONL
+- 可直接回流训练的 `annotations.csv/jsonl`
 - 人工复核最小字段表
 - 规则命中审计表
 - 训练样本 CSV/JSONL
@@ -125,6 +132,8 @@
 - `build-graph-dataset`
 - `train-gnn`
 - `score-gnn`
+- `split-feedback-loop`
+- `run-extension-round`
 
 主要产物：
 
@@ -133,6 +142,11 @@
 - `metadata.json`
 - `scores.json`
 - `scores.md`
+- `seller_review.csv`
+- `seller_review.xlsx`
+- `seller_review.md`
+- `frozen_eval.json`
+- `frozen_eval.md`
 
 ### 5.3 人工复核与轮次决策层
 
@@ -144,10 +158,18 @@
 - 对比轮次指标
 - 选择阈值并形成决策摘要
 
+当前默认复核策略不是“把所有 seller 候选一起倒给人工”，而是：
+
+- 先导出 `candidate_tier = strong_bridge_unknown_seller`
+- 先审强桥接层
+- 再按需要补看 `weak_bridge_high_score`
+
 主要命令：
 
 - `export-review-candidates`
 - `import-review-labels`
+- `split-feedback-loop`
+- `run-extension-round`
 - `merge-label-manifests`
 - `compare-round-metrics`
 - `make-round-report`
@@ -169,6 +191,7 @@ txflow-risk/
 │   ├── iterative_training.md
 │   └── project_manual_zh.md
 ├── data/
+│   ├── annotations/
 │   └── labels/
 ├── reports/
 ├── scripts/
@@ -199,6 +222,8 @@ txflow-risk/
   核心代码目录，CLI、数据处理、模型训练、报告生成都在这里
 - `data/labels/`
   标签清单存放位置
+- `data/annotations/`
+  轻量 `annotations.csv/jsonl` 存放位置，适合把 PDF 或人工复核结果快速回流训练
 - `docs/`
   项目文档
 - `scripts/`
@@ -228,6 +253,8 @@ txflow-risk/
 
 - 加载 `annotations.csv` 和 `annotations.jsonl`
 - 将 `positive / negative / skip` 转换为训练可消费的内部标签结构
+- 保留 `extension_role / anchor_subject` 这类扩线相关语义
+- 把一份已复核标注拆分成 `seed_train / holdout_eval / feedback_pool`
 - 将人工复核 CSV 直接导出为轻量标注文件
 ### 7.3 `src/txflow/training.py`
 
@@ -250,6 +277,127 @@ txflow-risk/
 ### 7.5 `src/txflow/graph_risk.py`
 
 图传播与图模型核心模块。
+
+当前实现上已经做了两类面向扩线的约束：
+
+- 弱化了过强的 `owner / workbook` 聚合影响
+- 增加了 `buyer / seller` 桥接边和账号级候选卖家聚合
+
+但它仍然是轻量行图，不是完整异构图；因此当前最佳实践是配合冻结评估和人工复核闭环使用。
+
+## 8. 闭环训练推荐流程
+
+当前推荐的 GNN 工作方式不是“直接把所有人工标注都喂进去”，而是三段式闭环：
+
+### 8.1 三类标注文件
+
+- `seed_train`
+  第一批人工确认、用于冷启动训练的真实流水
+- `holdout_eval`
+  冻结评估集，永远不参与训练，只用于比较轮次效果
+- `feedback_pool`
+  模型新跑出来并经人工复核确认的反馈结果，进入下一轮训练
+
+这三类数据的意义不同，不能混用。特别是：
+
+- `holdout_eval` 不能再喂回训练
+- 否则模型会逐渐“记答案”，轮次指标会失真
+
+### 8.2 自动拆分命令
+
+如果你已经有一份统一的人工标注文件，可以先拆分：
+
+```bash
+python3 -m txflow.cli split-feedback-loop \
+  --annotations data/annotations/reviewed.csv \
+  --seed-train-csv out/round_x/seed_train.csv \
+  --holdout-eval-csv out/round_x/holdout_eval.csv \
+  --feedback-pool-csv out/round_x/feedback_pool.csv
+```
+
+输出文件字段是：
+
+- `transaction_id`
+- `label`
+- `extension_role`
+- `anchor_subject`
+- `note`
+
+其中：
+
+- `extension_role` 用来区分 `seller_anchor / buyer_to_known_seller / buyer_to_unknown_candidate / negative_transaction` 等语义
+- `anchor_subject` 用来标记该条样本依附于哪个锚点主体
+
+### 8.3 闭环轮次命令
+
+拆分完成后，推荐直接用：
+
+```bash
+python3 -m txflow.cli run-extension-round \
+  --round-name round_x \
+  --train-root /path/to/train_root \
+  --score-root /path/to/score_root \
+  --seed-annotations out/round_x/seed_train.csv \
+  --holdout-annotations out/round_x/holdout_eval.csv \
+  --feedback-annotations out/round_x/feedback_pool.csv \
+  --output-dir out/round_x
+```
+
+这个命令会自动完成：
+
+- 用 `seed_train + feedback_pool` 构造训练标签
+- 检查 `holdout_eval` 是否和训练样本重叠
+- 训练 GNN
+- 生成交易行评分结果
+- 生成账号级 `seller_review.csv/md`
+- 生成冻结评估 `frozen_eval.json/md`
+- 生成聚合后的 `report.json/md`
+
+### 8.4 每轮关键输出
+
+一轮标准输出目录里，最关键的是：
+
+- `train_annotations.csv/jsonl`
+  实际进入训练的标注
+- `train_positive.json / train_negative.json`
+  训练 manifest
+- `scores.json / scores.md`
+  行级评分结果
+- `seller_review.csv / seller_review.md`
+  账号级扩线候选榜
+- `frozen_eval.json / frozen_eval.md`
+  冻结评估报告
+- `report.json / report.md`
+  聚合后的轮次摘要
+
+### 8.5 冻结评估怎么看
+
+`frozen_eval` 不再只看总体 `f1`，还要看：
+
+- 各 `extension_role` 下的 precision / recall
+- `seller_candidate_recovery`
+  也就是 holdout 中的正向 seller 账号，有多少能在账号级候选榜中被找回
+
+这比只看 `best_val_f1` 更接近“扩线效果”。
+
+### 8.6 如果仍然手工使用 `train-gnn`
+
+如果你暂时不想走 `run-extension-round`，至少也要这样排除 holdout：
+
+```bash
+python3 -m txflow.cli train-gnn \
+  --root /path/to/train_root \
+  --annotations out/round_x/seed_train.csv \
+  --exclude-annotations out/round_x/holdout_eval.csv \
+  --model out/round_x/model.pt \
+  --metrics out/round_x/metrics.json
+```
+
+`--exclude-annotations` 的作用是：
+
+- 先读取 holdout 文件中的 `transaction_id`
+- 再从训练标签里硬剔除这些样本
+- 防止冻结评估样本被误喂进训练
 
 主要负责：
 

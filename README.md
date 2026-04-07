@@ -10,6 +10,7 @@ The current project position is:
 
 It starts with a practical baseline:
 - ingest transaction exports from CSV
+- ingest payment statement exports from PDF
 - normalize accounts, amounts, timestamps, and directions
 - build a transaction network
 - score suspicious patterns with transparent rules
@@ -19,6 +20,12 @@ The project is intentionally human-review-first:
 - outputs are risk candidates, not final determinations
 - the baseline uses explainable rules before any ML/GNN layer
 - future GNN work can be added after the data and review loop are stable
+
+The current GNN workflow is now designed around a closed loop:
+- `seed_train`: manually verified seed labels used for training
+- `holdout_eval`: frozen labels that are never fed back into training
+- `feedback_pool`: newly reviewed model findings merged into the next round
+- seller-account candidate ranking and frozen-eval reporting are first-class outputs
 
 ## Current Scope
 
@@ -51,6 +58,24 @@ bash scripts/check.sh
 
 ```bash
 python3 -m txflow.cli analyze data/sample.csv --format markdown
+```
+
+You can also analyze native payment PDFs directly:
+
+```bash
+python3 -m txflow.cli analyze /path/to/wechat_or_alipay.pdf --format markdown
+```
+
+To convert WeChat/Alipay PDFs into normalized ledger rows and simplified
+annotations that can be reused in later training rounds:
+
+```bash
+python3 -m txflow.cli extract-payment-pdf \
+  /path/to/payment_pdfs \
+  --csv out/payment_pdf_rows.csv \
+  --annotations-csv out/payment_pdf_annotations.csv \
+  --label positive \
+  --note "confirmed by analyst"
 ```
 
 The repository includes `data/sample.csv`, a minimal night-activity example for
@@ -136,6 +161,113 @@ python3 -m txflow.cli graph-triage \
   --json out/graph_triage.json \
   --md out/graph_triage.md \
   --top-k 100
+```
+
+## Closed-Loop GNN Workflow
+
+To split one reviewed annotation file into `seed_train`, `holdout_eval`, and
+`feedback_pool`:
+
+```bash
+python3 -m txflow.cli split-feedback-loop \
+  --annotations data/annotations/reviewed.csv \
+  --seed-train-csv out/round_x/seed_train.csv \
+  --holdout-eval-csv out/round_x/holdout_eval.csv \
+  --feedback-pool-csv out/round_x/feedback_pool.csv
+```
+
+To run one constrained extension round:
+
+```bash
+python3 -m txflow.cli run-extension-round \
+  --round-name round_x \
+  --train-root /path/to/train_root \
+  --score-root /path/to/score_root \
+  --seed-annotations out/round_x/seed_train.csv \
+  --holdout-annotations out/round_x/holdout_eval.csv \
+  --feedback-annotations out/round_x/feedback_pool.csv \
+  --output-dir out/round_x
+```
+
+This command enforces three rules:
+- training only uses `seed_train + feedback_pool`
+- `holdout_eval` is checked for overlap and excluded from training
+- each round emits both a seller-account candidate list and a frozen-eval report
+
+By default, round review export is now narrowed to the first-priority tier:
+- `candidate_tier = strong_bridge_unknown_seller`
+- the default review artifacts are meant for bridge-first manual review, not broad score-only sweeps
+
+Key outputs per round:
+- `seller_review.csv/xlsx/md`: seller-account extension candidates for manual review
+- `frozen_eval.json/md`: frozen holdout evaluation report
+- `report.json/md`: combined round report with training, scoring, and frozen-eval summary
+- `round_viz.html`: minimal visual review page for seller candidates, buyer-seller bridges, and frozen-eval status
+
+To build the minimal visualization page for one round:
+
+```bash
+python3 -m txflow.cli visualize-round \
+  --scores out/round_x/scores.json \
+  --report out/round_x/report.json \
+  --frozen-eval out/round_x/frozen_eval.json \
+  --reviews out/round_x/seller_review.csv \
+  --html out/round_x/round_viz.html \
+  --title "round_x visual review"
+```
+
+Or build the comparison block inline without preparing `comparison.json` first:
+
+```bash
+python3 -m txflow.cli visualize-round \
+  --scores out/round_10/scores.json \
+  --report out/round_10/report.json \
+  --frozen-eval out/round_10/frozen_eval.json \
+  --compare-round round_08:out/round_08/metrics.json \
+  --compare-round round_09:out/round_09/metrics.json \
+  --compare-round round_10:out/round_10/metrics.json \
+  --html out/round_10/round_viz.html
+```
+
+This page is designed to answer three questions quickly:
+- which seller-account candidates should be reviewed first
+- which buyer-to-seller bridge paths support those candidates
+- whether the frozen holdout is improving with the current round
+
+The visualization now prefers seller-level `support_examples` embedded in
+`seller_candidates`, so candidate detail and timeline views are no longer
+limited to whatever happened to appear in `top_rows`.
+
+The visualization also supports tier-first review:
+- use the `Strong Bridge` filter to focus on `strong_bridge_unknown_seller`
+- use the `Weak Bridge` filter only after the strong-bridge queue has been reviewed
+
+To export only the first-priority strong-bridge seller candidates:
+
+```bash
+python3 -m txflow.cli export-review-candidates \
+  --scores out/round_x/scores.json \
+  --entity-type seller_account \
+  --tier strong_bridge_unknown_seller \
+  --xlsx out/round_x/seller_review_strong_bridge.xlsx
+```
+
+For seller-account candidates, the most important fields are now:
+- `candidate_tier`
+- `bridge_uplift`
+- `bridge_buyers`
+- `bridge_support_ratio`
+- `known_buyer_support`
+
+If you still use `train-gnn` directly, protect the holdout set explicitly:
+
+```bash
+python3 -m txflow.cli train-gnn \
+  --root /path/to/train_root \
+  --annotations out/round_x/seed_train.csv \
+  --exclude-annotations out/round_x/holdout_eval.csv \
+  --model out/round_x/model.pt \
+  --metrics out/round_x/metrics.json
 ```
 
 To normalize workbook ledgers into an internal full-field table:
@@ -310,6 +442,25 @@ The analyzer returns:
 ## Training Labels
 
 Labeled examples live under `data/labels/`.
+
+Confirmed payment-PDF samples can also live under:
+- `data/annotations/confirmed_payment_pdfs_positive.csv`
+- `data/annotations/confirmed_payment_pdfs_positive.jsonl`
+- `data/labels/confirmed_payment_pdfs_positive.json`
+
+The repository now includes one verified positive batch generated from:
+- one Alipay statement PDF covering `2026-01-01` to `2026-04-04`
+- two WeChat statement PDFs covering `2026-03-01` to `2026-03-31` and `2026-04-01` to `2026-04-04`
+
+You can train directly from the lightweight annotation file:
+
+```bash
+python3 -m txflow.cli train-gnn \
+  --root /path/to/workbooks \
+  --annotations data/annotations/confirmed_payment_pdfs_positive.csv \
+  --model out/payment_pdf_round_model.pt \
+  --metrics out/payment_pdf_round_metrics.json
+```
 
 Current convention:
 - one JSON manifest per verified label set

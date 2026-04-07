@@ -4,12 +4,16 @@ import csv
 import json
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
+import torch
+
+from .annotations import AnnotationRow, build_annotation_manifests_from_rows
 from .excel import write_xlsx_table
-from .graph_risk import GraphRiskModel
+from .graph_risk import GraphRiskModel, _metrics_from_predictions
 from .ledger_ops import (
     GraphDatasetSummary,
     NormalizedTransaction,
@@ -122,26 +126,34 @@ class SellerCandidateRow:
     seller_account: str
     score: float
     avg_row_score: float
+    bridge_uplift: float
     support_rows: int
     unique_buyers: int
     bridge_buyers: int
+    bridge_support_ratio: float
     known_buyer_support: int
+    candidate_tier: str
     unique_workbooks: int
     sample_counterparties: list[str]
     sample_workbooks: list[str]
+    support_examples: list[dict[str, Any]]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "seller_account": self.seller_account,
             "score": round(self.score, 4),
             "avg_row_score": round(self.avg_row_score, 4),
+            "bridge_uplift": round(self.bridge_uplift, 4),
             "support_rows": self.support_rows,
             "unique_buyers": self.unique_buyers,
             "bridge_buyers": self.bridge_buyers,
+            "bridge_support_ratio": round(self.bridge_support_ratio, 4),
             "known_buyer_support": self.known_buyer_support,
+            "candidate_tier": self.candidate_tier,
             "unique_workbooks": self.unique_workbooks,
             "sample_counterparties": list(self.sample_counterparties),
             "sample_workbooks": list(self.sample_workbooks),
+            "support_examples": [dict(item) for item in self.support_examples],
         }
 
 
@@ -174,6 +186,26 @@ class GNNScoreReport:
             "top_rows": [item.to_dict() for item in self.top_rows],
             "seller_candidates": [item.to_dict() for item in self.seller_candidates],
             "workbooks": list(self.workbooks),
+        }
+
+
+@dataclass(frozen=True)
+class FrozenEvalReport:
+    total_rows: int
+    positive_rows: int
+    negative_rows: int
+    metrics: dict[str, Any]
+    extension_role_summary: list[dict[str, Any]]
+    seller_candidate_recovery: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_rows": self.total_rows,
+            "positive_rows": self.positive_rows,
+            "negative_rows": self.negative_rows,
+            "metrics": dict(self.metrics),
+            "extension_role_summary": [dict(item) for item in self.extension_role_summary],
+            "seller_candidate_recovery": dict(self.seller_candidate_recovery),
         }
 
 
@@ -240,6 +272,7 @@ def _collect_rows(
     manifests: list[LabelManifest],
     role_annotation_path: str | Path | None = None,
     owner_annotation_path: str | Path | None = None,
+    annotation_meta_by_id: dict[str, dict[str, str]] | None = None,
 ) -> tuple[list[tuple[str, TrainingExample]], dict[str, list[TrainingExample]]]:
     base = Path(root)
     rows: list[tuple[str, TrainingExample]] = []
@@ -252,6 +285,7 @@ def _collect_rows(
             manifests,
             role_annotation_path=role_annotation_path,
             owner_annotation_path=owner_annotation_path,
+            annotation_meta_by_id=annotation_meta_by_id,
         )
         workbook_examples[str(workbook)] = examples
         for example in examples:
@@ -277,12 +311,14 @@ def train_gnn_model(
     pseudo_max_rows: int = 500,
     role_annotation_path: str | Path | None = None,
     owner_annotation_path: str | Path | None = None,
+    annotation_meta_by_id: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     rows, _ = _collect_rows(
         root,
         manifests,
         role_annotation_path=role_annotation_path,
         owner_annotation_path=owner_annotation_path,
+        annotation_meta_by_id=annotation_meta_by_id,
     )
     model = GraphRiskModel(
         hidden_dim=hidden_dim,
@@ -328,12 +364,14 @@ def score_gnn_directory(
     include_labeled: bool = False,
     role_annotation_path: str | Path | None = None,
     owner_annotation_path: str | Path | None = None,
+    annotation_meta_by_id: dict[str, dict[str, str]] | None = None,
 ) -> GNNScoreReport:
     rows, workbook_examples = _collect_rows(
         root,
         manifests,
         role_annotation_path=role_annotation_path,
         owner_annotation_path=owner_annotation_path,
+        annotation_meta_by_id=annotation_meta_by_id,
     )
     model = GraphRiskModel.load(model_path)
     scores = model.score_rows(rows)
@@ -411,7 +449,10 @@ def score_gnn_directory(
         )
 
     top_rows.sort(key=lambda item: (-item.score, item.workbook_path, item.row_index))
-    seller_candidates = _build_seller_candidates(all_scored_rows, top_k=top_k)
+    explicit_known_sellers = _known_seller_accounts(all_scored_rows)
+    inferred_anchor_sellers = _infer_anchor_seller_accounts(all_scored_rows)
+    known_sellers = explicit_known_sellers | inferred_anchor_sellers
+    seller_candidates = _build_seller_candidates(all_scored_rows, top_k=top_k, known_sellers=known_sellers)
     workbook_summaries.sort(key=lambda item: (-item["max_score"], item["path"]))
     selected_top_rows = top_rows[:top_k]
     summary = {
@@ -422,8 +463,24 @@ def score_gnn_directory(
         "avg_top_score": round(mean(item.score for item in selected_top_rows), 4) if selected_top_rows else 0.0,
         "max_top_score": round(max((item.score for item in selected_top_rows), default=0.0), 4),
         "avg_seller_candidate_score": round(mean(item.score for item in seller_candidates), 4) if seller_candidates else 0.0,
+        "explicit_known_sellers": len(explicit_known_sellers),
+        "inferred_anchor_sellers": len(inferred_anchor_sellers),
+        "known_seller_seeds": len(known_sellers),
+        "bridge_backed_candidates": sum(1 for item in seller_candidates if item.bridge_buyers > 0),
+        "bridge_candidate_rate": round(
+            sum(1 for item in seller_candidates if item.bridge_buyers > 0) / len(seller_candidates),
+            4,
+        )
+        if seller_candidates
+        else 0.0,
+        "avg_bridge_buyers": round(mean(item.bridge_buyers for item in seller_candidates), 4) if seller_candidates else 0.0,
+        "max_bridge_buyers": max((item.bridge_buyers for item in seller_candidates), default=0),
+        "strong_bridge_candidates": sum(1 for item in seller_candidates if item.candidate_tier == "strong_bridge_unknown_seller"),
+        "weak_bridge_candidates": sum(1 for item in seller_candidates if item.candidate_tier == "weak_bridge_high_score"),
+        "avg_bridge_uplift": round(mean(item.bridge_uplift for item in seller_candidates), 4) if seller_candidates else 0.0,
         "top_workbook": selected_top_rows[0].workbook_path if selected_top_rows else "",
         "top_seller_candidate": seller_candidates[0].seller_account if seller_candidates else "",
+        "top_bridge_seller_candidate": next((item.seller_account for item in seller_candidates if item.bridge_buyers > 0), ""),
     }
     recommendations: list[str] = []
     if seller_candidates:
@@ -448,6 +505,146 @@ def score_gnn_directory(
         seller_candidates=seller_candidates,
         workbooks=workbook_summaries,
     )
+
+
+def _annotation_meta(rows: list[AnnotationRow]) -> dict[str, dict[str, str]]:
+    return {
+        row.transaction_id: {
+            "extension_role": row.extension_role,
+            "anchor_subject": row.anchor_subject,
+        }
+        for row in rows
+    }
+
+
+def build_frozen_eval_report(
+    root: str | Path,
+    model_path: str | Path,
+    holdout_rows: list[AnnotationRow],
+    seller_candidates: list[SellerCandidateRow] | None = None,
+    role_annotation_path: str | Path | None = None,
+    owner_annotation_path: str | Path | None = None,
+) -> FrozenEvalReport:
+    manifests = build_annotation_manifests_from_rows(
+        holdout_rows,
+        dataset_name="holdout_eval",
+        source_file="holdout_eval",
+    )
+    meta_by_id = _annotation_meta(holdout_rows)
+    rows, _ = _collect_rows(
+        root,
+        manifests,
+        role_annotation_path=role_annotation_path,
+        owner_annotation_path=owner_annotation_path,
+        annotation_meta_by_id=meta_by_id,
+    )
+    model = GraphRiskModel.load(model_path)
+    scores = model.score_rows(rows)
+
+    y_true: list[int] = []
+    y_prob: list[float] = []
+    role_buckets: dict[str, dict[str, Any]] = defaultdict(lambda: {"rows": 0, "positive_rows": 0, "negative_rows": 0, "tp": 0, "fp": 0, "tn": 0, "fn": 0})
+    positive_sellers: set[str] = set()
+
+    for source_path, example in rows:
+        if example.label_status not in {"positive", "negative"}:
+            continue
+        key = f"{source_path}::{example.row_index}::{example.transaction_id or 'unknown'}"
+        score = float(scores.get(key, 0.5))
+        actual = 1 if example.label_status == "positive" else 0
+        predicted = 1 if score >= 0.5 else 0
+        role_name = meta_by_id.get(example.transaction_id, {}).get("extension_role") or example.extension_role or "unknown"
+        bucket = role_buckets[role_name]
+        bucket["rows"] += 1
+        if actual == 1:
+            bucket["positive_rows"] += 1
+            if example.seller_account:
+                positive_sellers.add(example.seller_account)
+        else:
+            bucket["negative_rows"] += 1
+        if predicted == 1 and actual == 1:
+            bucket["tp"] += 1
+        elif predicted == 1 and actual == 0:
+            bucket["fp"] += 1
+        elif predicted == 0 and actual == 0:
+            bucket["tn"] += 1
+        else:
+            bucket["fn"] += 1
+        y_true.append(actual)
+        y_prob.append(score)
+
+    metrics = _metrics_from_predictions(
+        torch.tensor(y_true, dtype=torch.long),
+        torch.tensor(y_prob, dtype=torch.float32),
+    )
+    extension_role_summary: list[dict[str, Any]] = []
+    for role_name, bucket in sorted(role_buckets.items()):
+        precision = bucket["tp"] / (bucket["tp"] + bucket["fp"]) if (bucket["tp"] + bucket["fp"]) else 0.0
+        recall = bucket["tp"] / (bucket["tp"] + bucket["fn"]) if (bucket["tp"] + bucket["fn"]) else 0.0
+        extension_role_summary.append(
+            {
+                "extension_role": role_name,
+                "rows": bucket["rows"],
+                "positive_rows": bucket["positive_rows"],
+                "negative_rows": bucket["negative_rows"],
+                "precision": round(precision, 4),
+                "recall": round(recall, 4),
+            }
+        )
+
+    candidate_accounts = [item.seller_account for item in (seller_candidates or [])]
+    positive_seller_hits = sorted(account for account in positive_sellers if account in set(candidate_accounts))
+    seller_candidate_recovery = {
+        "holdout_positive_seller_count": len(positive_sellers),
+        "candidate_count": len(candidate_accounts),
+        "recovered_positive_sellers": len(positive_seller_hits),
+        "recovery_rate": round((len(positive_seller_hits) / len(positive_sellers)) if positive_sellers else 0.0, 4),
+        "matched_seller_accounts": positive_seller_hits[:20],
+    }
+    return FrozenEvalReport(
+        total_rows=len(y_true),
+        positive_rows=sum(y_true),
+        negative_rows=len(y_true) - sum(y_true),
+        metrics=metrics,
+        extension_role_summary=extension_role_summary,
+        seller_candidate_recovery=seller_candidate_recovery,
+    )
+
+
+def export_frozen_eval_json(report: FrozenEvalReport, output_path: str | Path) -> Path:
+    return write_json_file(output_path, report.to_dict())
+
+
+def export_frozen_eval_markdown(report: FrozenEvalReport, output_path: str | Path) -> Path:
+    lines = ["# Frozen Eval Report", ""]
+    lines.append(f"- total_rows: {report.total_rows}")
+    lines.append(f"- positive_rows: {report.positive_rows}")
+    lines.append(f"- negative_rows: {report.negative_rows}")
+    lines.append(f"- accuracy: {float(report.metrics.get('accuracy', 0.0)):.4f}")
+    lines.append(f"- precision: {float(report.metrics.get('precision', 0.0)):.4f}")
+    lines.append(f"- recall: {float(report.metrics.get('recall', 0.0)):.4f}")
+    lines.append(f"- f1: {float(report.metrics.get('f1', 0.0)):.4f}")
+    lines.append("")
+    lines.append("## Extension Roles")
+    lines.append("")
+    lines.append("| extension_role | rows | positive_rows | negative_rows | precision | recall |")
+    lines.append("| --- | ---: | ---: | ---: | ---: | ---: |")
+    for item in report.extension_role_summary:
+        lines.append(
+            f"| {item['extension_role']} | {item['rows']} | {item['positive_rows']} | {item['negative_rows']} | {item['precision']:.4f} | {item['recall']:.4f} |"
+        )
+    lines.append("")
+    lines.append("## Seller Recovery")
+    lines.append("")
+    recovery = report.seller_candidate_recovery
+    lines.append(f"- holdout_positive_seller_count: {int(recovery.get('holdout_positive_seller_count', 0))}")
+    lines.append(f"- candidate_count: {int(recovery.get('candidate_count', 0))}")
+    lines.append(f"- recovered_positive_sellers: {int(recovery.get('recovered_positive_sellers', 0))}")
+    lines.append(f"- recovery_rate: {float(recovery.get('recovery_rate', 0.0)):.4f}")
+    matched = recovery.get("matched_seller_accounts", [])
+    if matched:
+        lines.append(f"- matched_seller_accounts: {', '.join(str(item) for item in matched)}")
+    return write_markdown_lines(output_path, lines)
 
 
 def _subject_name_from_workbook(path: str) -> str:
@@ -489,29 +686,100 @@ def _resolve_party_role(account: str, example: TrainingExample) -> str:
 
 
 def _sanitize_review_text(value: Any) -> str:
-    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    text = ("" if value is None else str(value)).replace("\r", " ").replace("\n", " ").strip()
     text = text.replace(",", " | ")
     return " ".join(text.split())
+
+
+def _valid_party_account(value: Any) -> bool:
+    text = str(value or "").strip()
+    return text not in {"", "-", "--", "/", "null", "none"}
+
+
+def _candidate_tier(bridge_buyers: int, known_buyer_support: int, bridge_ratio: float, support_rows: int) -> str:
+    if bridge_buyers >= 3 or known_buyer_support >= 5 or (bridge_buyers >= 2 and bridge_ratio >= 0.35):
+        return "strong_bridge_unknown_seller"
+    if bridge_buyers >= 1:
+        return "weak_bridge_high_score"
+    if support_rows >= 20:
+        return "high_support_non_bridge"
+    return "score_only"
 
 
 def _known_seller_accounts(rows: list[GNNScoreRow]) -> set[str]:
     known: set[str] = set()
     for item in rows:
         seller = str(item.seller_account or "").strip()
-        if not seller:
+        if not _valid_party_account(seller):
             continue
         if item.label_status == "positive" or item.extension_role in {"seller_anchor", "buyer_to_known_seller"}:
             known.add(seller)
     return known
 
 
-def _build_seller_candidates(rows: list[GNNScoreRow], top_k: int) -> list[SellerCandidateRow]:
-    known_sellers = _known_seller_accounts(rows)
+def _buyer_like_workbook(path: str) -> bool:
+    stem = Path(path).stem.lower()
+    return "嫖客" in stem or "buyer" in stem or stem.startswith("wxid_")
+
+
+def _infer_anchor_seller_accounts(rows: list[GNNScoreRow]) -> set[str]:
+    anchors: set[str] = set()
+    grouped: dict[str, list[GNNScoreRow]] = defaultdict(list)
+    for item in rows:
+        grouped[item.workbook_path].append(item)
+
+    for workbook_path, workbook_rows in grouped.items():
+        if _buyer_like_workbook(workbook_path):
+            continue
+        seller_groups: dict[str, list[GNNScoreRow]] = defaultdict(list)
+        for row in workbook_rows:
+            seller = str(row.seller_account or "").strip()
+            if _valid_party_account(seller):
+                seller_groups[seller].append(row)
+        if not seller_groups:
+            continue
+        total_rows = len(workbook_rows)
+        ranked_groups = sorted(
+            seller_groups.items(),
+            key=lambda entry: (
+                -len(entry[1]),
+                -len({str(item.buyer_account or "").strip() for item in entry[1] if str(item.buyer_account or "").strip()}),
+                -max((item.score for item in entry[1]), default=0.0),
+                entry[0],
+            ),
+        )
+        added = 0
+        for seller, seller_rows in ranked_groups:
+            seller_share = (len(seller_rows) / total_rows) if total_rows else 0.0
+            unique_buyers = len({str(item.buyer_account or "").strip() for item in seller_rows if str(item.buyer_account or "").strip()})
+            inbound_ratio = (
+                sum(1 for item in seller_rows if item.direction == "入账" and str(item.payee_account or "").strip() == seller)
+                / len(seller_rows)
+            ) if seller_rows else 0.0
+            if (
+                len(seller_rows) >= 25
+                and unique_buyers >= 8
+                and inbound_ratio >= 0.55
+                and (seller_share >= 0.18 or len(seller_rows) >= 80 or unique_buyers >= 25)
+            ):
+                anchors.add(seller)
+                added += 1
+            if added >= 3:
+                break
+    return anchors
+
+
+def _build_seller_candidates(
+    rows: list[GNNScoreRow],
+    top_k: int,
+    known_sellers: set[str] | None = None,
+) -> list[SellerCandidateRow]:
+    known_sellers = set(known_sellers or ())
     buyer_known_links: dict[str, set[str]] = defaultdict(set)
     for item in rows:
         buyer = str(item.buyer_account or "").strip()
         seller = str(item.seller_account or "").strip()
-        if not buyer or not seller:
+        if not _valid_party_account(buyer) or not _valid_party_account(seller):
             continue
         if seller in known_sellers:
             buyer_known_links[buyer].add(seller)
@@ -519,44 +787,258 @@ def _build_seller_candidates(rows: list[GNNScoreRow], top_k: int) -> list[Seller
     grouped: dict[str, list[GNNScoreRow]] = defaultdict(list)
     for item in rows:
         seller = str(item.seller_account or "").strip()
-        if not seller or seller in known_sellers:
+        if not _valid_party_account(seller) or seller in known_sellers:
             continue
         grouped[seller].append(item)
 
     candidates: list[SellerCandidateRow] = []
     for seller, items in grouped.items():
-        buyers = {str(item.buyer_account or "").strip() for item in items if item.buyer_account}
+        buyers = {str(item.buyer_account or "").strip() for item in items if _valid_party_account(item.buyer_account)}
         bridge_buyers = {buyer for buyer in buyers if buyer_known_links.get(buyer)}
         counterparty_samples = sorted({item.counterparty_name or item.counterparty for item in items if item.counterparty_name or item.counterparty})[:3]
         workbook_samples = sorted({item.workbook_path for item in items if item.workbook_path})[:3]
         max_score = max(item.score for item in items)
         avg_score = mean(item.score for item in items)
         bridge_ratio = (len(bridge_buyers) / len(buyers)) if buyers else 0.0
-        candidate_score = max_score + 0.08 * len(bridge_buyers) + 0.04 * len(buyers) + 0.02 * bridge_ratio
+        known_buyer_support = sum(len(buyer_known_links.get(buyer, set())) for buyer in bridge_buyers)
+        bridge_uplift = (
+            + 0.22 * len(bridge_buyers)
+            + 0.05 * min(known_buyer_support, 12)
+            + 0.05 * len(buyers)
+            + 0.04 * bridge_ratio
+        )
+        candidate_score = max_score + bridge_uplift
+        candidate_tier = _candidate_tier(len(bridge_buyers), known_buyer_support, bridge_ratio, len(items))
+        support_examples = _select_support_examples(
+            items,
+            limit=12,
+            bridge_buyers=bridge_buyers,
+            buyer_known_links=buyer_known_links,
+        )
         candidates.append(
             SellerCandidateRow(
                 seller_account=seller,
                 score=candidate_score,
                 avg_row_score=avg_score,
+                bridge_uplift=bridge_uplift,
                 support_rows=len(items),
                 unique_buyers=len(buyers),
                 bridge_buyers=len(bridge_buyers),
-                known_buyer_support=sum(len(buyer_known_links.get(buyer, set())) for buyer in bridge_buyers),
+                bridge_support_ratio=bridge_ratio,
+                known_buyer_support=known_buyer_support,
+                candidate_tier=candidate_tier,
                 unique_workbooks=len({item.workbook_path for item in items}),
                 sample_counterparties=counterparty_samples,
                 sample_workbooks=workbook_samples,
+                support_examples=support_examples,
             )
         )
     candidates.sort(
         key=lambda item: (
-            -item.score,
+            item.candidate_tier != "strong_bridge_unknown_seller",
+            item.candidate_tier != "weak_bridge_high_score",
+            -(1 if item.bridge_buyers > 0 else 0),
             -item.bridge_buyers,
+            -item.known_buyer_support,
+            -item.bridge_support_ratio,
+            -item.score,
             -item.unique_buyers,
             -item.support_rows,
             item.seller_account,
         )
     )
     return candidates[:top_k]
+
+
+def _select_support_examples(
+    items: list[GNNScoreRow],
+    limit: int = 12,
+    bridge_buyers: set[str] | None = None,
+    buyer_known_links: dict[str, set[str]] | None = None,
+) -> list[dict[str, Any]]:
+    if not items or limit <= 0:
+        return []
+    bridge_buyer_set = {str(item).strip() for item in (bridge_buyers or set()) if str(item).strip()}
+    known_link_map = buyer_known_links or {}
+    selected: list[GNNScoreRow] = []
+    seen_keys: set[str] = set()
+    deduped_items = _dedupe_support_rows(items)
+    grouped_by_buyer: dict[str, list[GNNScoreRow]] = defaultdict(list)
+    for item in deduped_items:
+        buyer = str(item.buyer_account or "").strip() or "(missing)"
+        grouped_by_buyer[buyer].append(item)
+
+    ordered_buyers = sorted(
+        grouped_by_buyer.items(),
+        key=lambda entry: (
+            entry[0] not in bridge_buyer_set,
+            -len(entry[1]),
+            -max(row.score for row in entry[1]),
+            _support_row_sort_key(entry[1][0]),
+        ),
+    )
+    for _, buyer_items in ordered_buyers:
+        buyer_items.sort(key=lambda row: _support_row_priority_key(row, bridge_buyer_set))
+        if _append_support_row(selected, seen_keys, buyer_items[0], limit):
+            return _serialize_support_rows(_finalize_support_rows(selected), bridge_buyer_set, known_link_map)
+
+    bridge_timed_items = [item for item in deduped_items if _parse_support_timestamp(item.timestamp) is not None and str(item.buyer_account or "").strip() in bridge_buyer_set]
+    bridge_timed_items.sort(key=_support_row_time_key)
+    for item in _time_anchor_rows(bridge_timed_items):
+        if _append_support_row(selected, seen_keys, item, limit):
+            return _serialize_support_rows(_finalize_support_rows(selected), bridge_buyer_set, known_link_map)
+
+    timed_items = [item for item in deduped_items if _parse_support_timestamp(item.timestamp) is not None]
+    timed_items.sort(key=_support_row_time_key)
+    for item in _time_anchor_rows(timed_items):
+        if _append_support_row(selected, seen_keys, item, limit):
+            return _serialize_support_rows(_finalize_support_rows(selected), bridge_buyer_set, known_link_map)
+
+    buyer_queues = [buyer_items[1:] for _, buyer_items in ordered_buyers if len(buyer_items) > 1]
+    queue_index = 0
+    while len(selected) < limit and buyer_queues:
+        buyer_rows = buyer_queues[queue_index]
+        if buyer_rows:
+            row = buyer_rows.pop(0)
+            if _append_support_row(selected, seen_keys, row, limit):
+                return [item.to_dict() for item in _finalize_support_rows(selected)]
+        if not buyer_rows:
+            buyer_queues.pop(queue_index)
+            if not buyer_queues:
+                break
+            queue_index %= len(buyer_queues)
+            continue
+        queue_index = (queue_index + 1) % len(buyer_queues)
+
+    if len(selected) < limit:
+        for item in sorted(deduped_items, key=lambda row: _support_row_priority_key(row, bridge_buyer_set)):
+            if _append_support_row(selected, seen_keys, item, limit):
+                return _serialize_support_rows(_finalize_support_rows(selected), bridge_buyer_set, known_link_map)
+
+    return _serialize_support_rows(_finalize_support_rows(selected), bridge_buyer_set, known_link_map)
+
+
+def _dedupe_support_rows(items: list[GNNScoreRow]) -> list[GNNScoreRow]:
+    deduped: list[GNNScoreRow] = []
+    seen_keys: set[str] = set()
+    for item in sorted(items, key=_support_row_priority_key):
+        dedupe_key = _support_row_key(item)
+        if dedupe_key in seen_keys:
+            continue
+        deduped.append(item)
+        seen_keys.add(dedupe_key)
+    return deduped
+
+
+def _support_row_key(item: GNNScoreRow) -> str:
+    return f"{item.workbook_path}::{item.row_index}::{item.transaction_id}"
+
+
+def _append_support_row(
+    selected: list[GNNScoreRow],
+    seen_keys: set[str],
+    item: GNNScoreRow,
+    limit: int,
+) -> bool:
+    dedupe_key = _support_row_key(item)
+    if dedupe_key in seen_keys:
+        return False
+    selected.append(item)
+    seen_keys.add(dedupe_key)
+    return len(selected) >= limit
+
+
+def _parse_support_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("/", "-").replace("T", " ")
+    normalized = " ".join(normalized.split())
+    compact = "".join(ch for ch in text if ch.isdigit())
+    candidates = [normalized, normalized[:19], normalized[:16], normalized[:10]]
+    if compact:
+        candidates.extend([compact, compact[:14], compact[:12], compact[:8]])
+    formats = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y%m%d%H%M%S",
+        "%Y%m%d%H%M",
+        "%Y%m%d",
+    )
+    for candidate in candidates:
+        for fmt in formats:
+            try:
+                return datetime.strptime(candidate, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _support_row_sort_key(item: GNNScoreRow) -> tuple[Any, ...]:
+    parsed_time = _parse_support_timestamp(item.timestamp)
+    return (
+        parsed_time is None,
+        parsed_time or datetime.max,
+        -item.score,
+        item.row_index,
+        item.workbook_path,
+    )
+
+
+def _support_row_time_key(item: GNNScoreRow) -> tuple[Any, ...]:
+    parsed_time = _parse_support_timestamp(item.timestamp)
+    return (
+        parsed_time or datetime.max,
+        -item.score,
+        item.row_index,
+        item.workbook_path,
+    )
+
+
+def _support_row_priority_key(item: GNNScoreRow, bridge_buyers: set[str] | None = None) -> tuple[Any, ...]:
+    parsed_time = _parse_support_timestamp(item.timestamp)
+    buyer = str(item.buyer_account or "").strip()
+    return (
+        buyer not in (bridge_buyers or set()),
+        -item.score,
+        parsed_time is None,
+        parsed_time or datetime.max,
+        not buyer,
+        item.row_index,
+        item.workbook_path,
+    )
+
+
+def _time_anchor_rows(items: list[GNNScoreRow]) -> list[GNNScoreRow]:
+    if not items:
+        return []
+    anchor_indices = {0, len(items) - 1}
+    if len(items) >= 3:
+        anchor_indices.add(len(items) // 2)
+    if len(items) >= 4:
+        anchor_indices.add(max(0, round((len(items) - 1) * 0.25)))
+        anchor_indices.add(max(0, round((len(items) - 1) * 0.75)))
+    return [items[index] for index in sorted(anchor_indices)]
+
+
+def _finalize_support_rows(items: list[GNNScoreRow]) -> list[GNNScoreRow]:
+    return sorted(items, key=_support_row_time_key)
+
+
+def _serialize_support_rows(
+    items: list[GNNScoreRow],
+    bridge_buyers: set[str],
+    buyer_known_links: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for item in items:
+        row = item.to_dict()
+        buyer = str(item.buyer_account or "").strip()
+        row["bridge_buyer"] = buyer in bridge_buyers
+        row["known_seller_links"] = len(buyer_known_links.get(buyer, set()))
+        serialized.append(row)
+    return serialized
 
 
 def export_gnn_score_json(report: GNNScoreReport, output_path: str | Path) -> Path:
@@ -577,8 +1059,19 @@ def export_gnn_score_markdown(report: GNNScoreReport, output_path: str | Path) -
     lines.append(f"- returned_seller_candidates: {int(report.summary.get('returned_seller_candidates', 0))}")
     lines.append(f"- avg_top_score: {float(report.summary.get('avg_top_score', 0.0)):.4f}")
     lines.append(f"- avg_seller_candidate_score: {float(report.summary.get('avg_seller_candidate_score', 0.0)):.4f}")
+    lines.append(f"- explicit_known_sellers: {int(report.summary.get('explicit_known_sellers', 0))}")
+    lines.append(f"- inferred_anchor_sellers: {int(report.summary.get('inferred_anchor_sellers', 0))}")
+    lines.append(f"- known_seller_seeds: {int(report.summary.get('known_seller_seeds', 0))}")
+    lines.append(f"- bridge_backed_candidates: {int(report.summary.get('bridge_backed_candidates', 0))}")
+    lines.append(f"- bridge_candidate_rate: {float(report.summary.get('bridge_candidate_rate', 0.0)):.4f}")
+    lines.append(f"- avg_bridge_buyers: {float(report.summary.get('avg_bridge_buyers', 0.0)):.4f}")
+    lines.append(f"- max_bridge_buyers: {int(report.summary.get('max_bridge_buyers', 0))}")
+    lines.append(f"- strong_bridge_candidates: {int(report.summary.get('strong_bridge_candidates', 0))}")
+    lines.append(f"- weak_bridge_candidates: {int(report.summary.get('weak_bridge_candidates', 0))}")
+    lines.append(f"- avg_bridge_uplift: {float(report.summary.get('avg_bridge_uplift', 0.0)):.4f}")
     lines.append(f"- top_workbook: {report.summary.get('top_workbook', '')}")
     lines.append(f"- top_seller_candidate: {report.summary.get('top_seller_candidate', '')}")
+    lines.append(f"- top_bridge_seller_candidate: {report.summary.get('top_bridge_seller_candidate', '')}")
     lines.append("")
     lines.append("## Recommendations")
     lines.append("")
@@ -587,11 +1080,11 @@ def export_gnn_score_markdown(report: GNNScoreReport, output_path: str | Path) -
     lines.append("")
     lines.append("## Seller Candidates")
     lines.append("")
-    lines.append("| score | seller_account | bridge_buyers | unique_buyers | rows | workbooks |")
-    lines.append("| --- | --- | ---: | ---: | ---: | ---: |")
+    lines.append("| tier | score | uplift | seller_account | bridge_buyers | bridge_ratio | known_links | unique_buyers | rows | workbooks |")
+    lines.append("| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for item in report.seller_candidates:
         lines.append(
-            f"| {item.score:.4f} | {item.seller_account} | {item.bridge_buyers} | {item.unique_buyers} | {item.support_rows} | {item.unique_workbooks} |"
+            f"| {item.candidate_tier} | {item.score:.4f} | {item.bridge_uplift:.4f} | {item.seller_account} | {item.bridge_buyers} | {item.bridge_support_ratio:.4f} | {item.known_buyer_support} | {item.unique_buyers} | {item.support_rows} | {item.unique_workbooks} |"
         )
     lines.append("")
     lines.append("## Top Rows")
@@ -620,6 +1113,7 @@ def export_review_candidates(
     threshold: float = 0.7,
     limit: int = 100,
     entity_type: str = "auto",
+    tier: str = "",
 ) -> list[dict[str, Any]]:
     transaction_review_fields = [
         "record_id",
@@ -660,7 +1154,11 @@ def export_review_candidates(
         "review_options",
         "review_note",
         "seller_account",
+        "candidate_tier",
+        "bridge_uplift",
         "bridge_buyers",
+        "bridge_support_ratio",
+        "known_buyer_support",
         "unique_buyers",
         "support_rows",
         "unique_workbooks",
@@ -675,10 +1173,17 @@ def export_review_candidates(
         score = float(item.get("score", 0.0))
         if score < threshold:
             continue
+        item_tier = str(item.get("candidate_tier", "")).strip()
+        if tier and item_tier != tier:
+            continue
         if use_seller_candidates:
             reason_parts = [
                 f"score={score:.4f}",
+                f"tier={str(item.get('candidate_tier', ''))}",
+                f"bridge_uplift={float(item.get('bridge_uplift', 0.0)):.4f}",
                 f"bridge_buyers={int(item.get('bridge_buyers', 0))}",
+                f"bridge_ratio={float(item.get('bridge_support_ratio', 0.0)):.4f}",
+                f"known_links={int(item.get('known_buyer_support', 0))}",
                 f"unique_buyers={int(item.get('unique_buyers', 0))}",
             ]
             candidates.append(
@@ -690,7 +1195,11 @@ def export_review_candidates(
                     "review_options": "confirmed_positive|confirmed_negative|uncertain",
                     "review_note": " ; ".join(reason_parts),
                     "seller_account": item.get("seller_account", ""),
+                    "candidate_tier": item.get("candidate_tier", ""),
+                    "bridge_uplift": item.get("bridge_uplift", 0.0),
                     "bridge_buyers": item.get("bridge_buyers", 0),
+                    "bridge_support_ratio": item.get("bridge_support_ratio", 0.0),
+                    "known_buyer_support": item.get("known_buyer_support", 0),
                     "unique_buyers": item.get("unique_buyers", 0),
                     "support_rows": item.get("support_rows", 0),
                     "unique_workbooks": item.get("unique_workbooks", 0),

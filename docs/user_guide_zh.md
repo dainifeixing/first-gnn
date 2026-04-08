@@ -68,6 +68,12 @@ out/
     ├── frozen_eval.json
     ├── frozen_eval.md
     ├── round_viz.html
+    ├── showcase_bundle/
+    │   ├── index.html
+    │   ├── app.js
+    │   ├── styles.css
+    │   ├── manifest.js
+    │   └── showcase_manifest.json
     ├── review.csv
     ├── review.md
     ├── report.json
@@ -244,11 +250,118 @@ python3 -m txflow.cli visualize-round \
 - 再看 `buyer -> seller` 桥接关系是否成立
 - 最后看 `frozen eval` 是否真的变好
 
+现在 `round_viz.html` 里也补了一个轻量版协作面板，会显示：
+
+- agent 分工
+- 共识与冲突
+- 最终采纳改动
+- 协作时间线
+
 现在推荐的看法顺序是：
 
 - 先点 `Strong Bridge`
 - 优先复核 `strong_bridge_unknown_seller`
 - 第一优先层看完，再切到 `Weak Bridge`
+
+如果你要把一轮结果给其他人展示，不要直接把内部复核页丢出去，更建议额外导出静态展示包：
+
+```bash
+python3 -m txflow.cli build-showcase-bundle \
+  --scores out/round_01/scores.json \
+  --report out/round_01/report.json \
+  --frozen-eval out/round_01/frozen_eval.json \
+  --reviews out/round_01/seller_review.csv \
+  --output-dir out/round_01/showcase_bundle \
+  --title "round_01 showcase"
+```
+
+这套展示包的用途是：
+
+- 给非开发人员或非建模人员看结果
+- 一页展示 `overview / seller candidates / candidate detail / bridge graph / frozen eval`
+- 单独保留 `showcase_manifest.json`，后面可以继续接 React 或正式 Web 前端
+
+这套展示包现在有两种查看模式：
+
+- `Presentation`
+  - 默认模式
+  - 自动对 seller/buyer/对手方/复核备注做脱敏
+  - 适合给外部汇报或非研判人员看
+- `Internal`
+  - 展示完整字段
+  - 适合内部研判或复核会商
+
+切换方式有两种：
+
+- 直接点页面右上角 `View Mode`
+- 或在地址后面加：
+  - `?view=public`
+  - `?view=internal`
+
+如果你要在一次汇报里切多轮结果，不要来回换目录，可以把多轮 manifest 合成一个 bundle：
+
+```bash
+python3 -m txflow.cli build-showcase-bundle \
+  --scores out/round_10/scores.json \
+  --report out/round_10/report.json \
+  --frozen-eval out/round_10/frozen_eval.json \
+  --output-dir out/showcase_multi \
+  --extra-showcase round_08:out/round_08/showcase_manifest.json \
+  --extra-showcase round_09:out/round_09/showcase_manifest.json \
+  --title "multi-round showcase"
+```
+
+生成后页面顶部会出现 round 切换按钮，可以直接在一个展示页里切不同轮次。
+
+现在首页还会额外给你两块更适合汇报的内容：
+
+- `Executive Summary`
+  - 概括这一轮的扩线价值
+  - 如果有上一轮，还会直接给出相对变化
+- `Agent Collaboration`
+  - 把多条工作线如何分工、形成共识、解决冲突、最终采纳哪些改动放到一个面板里
+  - 适合向他人解释“这不是单个模型自己打分”，而是多条分析线协同收敛出的结果
+- `Collaboration Timeline`
+  - 把规则、结构、实验、评估几条线按步骤串成一条时间线
+  - 适合汇报时说明“这轮方案是怎么一步步定下来的”
+  - 现在 timeline 里的步骤也可以直接点开对应证据面板，不只是静态说明
+- `Presentation Queue`
+  - 给出这次汇报最值得先讲的 seller 候选
+- `Presenter Notes`
+  - 针对当前候选自动生成一段可直接照着讲的说明
+  - 支持 `Export Briefing .md` 一键导出当前汇报稿
+  - 也支持 `Export Briefing .html` 导出单页 HTML 汇报材料，适合打印或单独转发
+
+如果你要直接投屏汇报，可以打开：
+
+- `Stage Mode`
+  - 会切到更干净的展示布局
+  - 浏览器允许的话会直接进入全屏
+
+快捷键：
+
+- `Left / Right`
+  - 切上一条 / 下一条候选
+- `Space`
+  - 开始或停止自动播放
+- `F`
+  - 进入或退出 `Stage Mode`
+
+如果你要把当前候选单独导出成一页汇报稿，推荐这样用：
+
+- 先在展示页里选中当前 seller 候选
+- 再点 `Export Briefing .md` 或 `Export Briefing .html`
+- `md` 适合二次编辑
+- `html` 适合直接发送、打印或归档
+- 单候选 `html` 现在还会带“为什么这个候选被多线共同推到前面”的协作摘要
+- 单候选 `md` 现在也会带同样的协作摘要，和 `html` 口径保持一致
+
+如果你导出的是 `Export Executive .html`，现在里面还会带上：
+
+- 多条 agent 工作线
+- 共识与冲突
+- 最终采纳改动
+- 协作时间线
 
 如果你暂时还要手工使用旧命令，至少这样写：
 

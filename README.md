@@ -203,6 +203,7 @@ Key outputs per round:
 - `frozen_eval.json/md`: frozen holdout evaluation report
 - `report.json/md`: combined round report with training, scoring, and frozen-eval summary
 - `round_viz.html`: minimal visual review page for seller candidates, buyer-seller bridges, and frozen-eval status
+- `showcase_bundle/`: static presentation bundle for sharing with other reviewers or stakeholders
 
 To build the minimal visualization page for one round:
 
@@ -234,6 +235,11 @@ This page is designed to answer three questions quickly:
 - which buyer-to-seller bridge paths support those candidates
 - whether the frozen holdout is improving with the current round
 
+The lightweight `round_viz.html` now also includes:
+- a compact collaboration panel
+- agent lanes, consensus, conflicts, and adopted changes
+- a collaboration timeline with anchor links into the existing review sections
+
 The visualization now prefers seller-level `support_examples` embedded in
 `seller_candidates`, so candidate detail and timeline views are no longer
 limited to whatever happened to appear in `top_rows`.
@@ -241,6 +247,88 @@ limited to whatever happened to appear in `top_rows`.
 The visualization also supports tier-first review:
 - use the `Strong Bridge` filter to focus on `strong_bridge_unknown_seller`
 - use the `Weak Bridge` filter only after the strong-bridge queue has been reviewed
+
+To build a shareable static showcase bundle:
+
+```bash
+python3 -m txflow.cli build-showcase-bundle \
+  --scores out/round_x/scores.json \
+  --report out/round_x/report.json \
+  --frozen-eval out/round_x/frozen_eval.json \
+  --reviews out/round_x/seller_review.csv \
+  --output-dir out/round_x/showcase_bundle \
+  --title "round_x showcase"
+```
+
+The bundle contains:
+- `index.html`
+- `index.js`
+- `app.js`
+- `styles.css`
+- `manifest.js`
+- `showcase_index.json`
+- `showcase_manifest.json`
+
+This bundle is intended for external presentation:
+- open `index.html` from a static file server, or directly as a local file
+- use it to show overview metrics, seller candidates, bridge evidence, frozen eval, and round comparison in one place
+- keep the raw analyst workflow in `round_viz.html`, and use the showcase bundle for stakeholder-facing walkthroughs
+
+The showcase bundle now supports two display modes:
+- `Presentation`: default masked mode for stakeholder demos
+- `Internal`: full-detail mode for analyst walkthroughs
+
+You can switch modes in the page header, or open:
+- `index.html?view=public`
+- `index.html?view=internal`
+
+To place multiple rounds into one showcase bundle:
+
+```bash
+python3 -m txflow.cli build-showcase-bundle \
+  --scores out/round_10/scores.json \
+  --report out/round_10/report.json \
+  --frozen-eval out/round_10/frozen_eval.json \
+  --output-dir out/showcase_multi \
+  --extra-showcase round_08:out/round_08/showcase_manifest.json \
+  --extra-showcase round_09:out/round_09/showcase_manifest.json \
+  --title "multi-round showcase"
+```
+
+The page header will then let you switch rounds directly inside one bundle.
+
+The showcase landing page now also includes:
+- `Executive Summary`: a presentation-first summary of extension value and round deltas
+- `Agent Collaboration`: a multi-lane view of how rules, graph, experiment, and evaluation workstreams aligned on the current round
+- `Collaboration Timeline`: a step-by-step storyline that shows how the workstreams converged into the final review strategy
+  - both the agent cards and the timeline steps now expose clickable evidence links into the live showcase panels
+- `Presentation Queue`: the first seller candidates to walk through during a stakeholder briefing
+- `Presenter Notes`: a short speaking script for the currently selected candidate
+
+The presenter-notes panel now supports one-click export:
+- `Export Briefing .md`
+- `Export Briefing .html`
+- exports the current `Executive Summary + Talk Track + Presenter Notes + Candidate Snapshot`
+- both exports now also carry the candidate-level collaboration rationale
+
+The HTML export is intended for quick sharing and print-style review:
+- keeps the current masked/internal view mode in the exported sheet
+- renders a standalone briefing page with inline styles
+- works well for sending a single-candidate briefing without the full interactive showcase
+- now also explains why the current candidate was elevated across the collaboration lanes
+
+The executive export now also carries the collaboration view:
+- agent lanes
+- consensus and conflicts
+- adopted changes
+- collaboration timeline
+
+The presentation queue now also supports a clean stage mode:
+- `Stage Mode` toggles a presentation-focused layout and attempts fullscreen
+- keyboard shortcuts:
+  - `Left` / `Right`: previous or next candidate
+  - `Space`: start or stop autoplay
+  - `F`: enter or exit stage mode
 
 To export only the first-priority strong-bridge seller candidates:
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 from collections import defaultdict
 from datetime import datetime
 from html import escape
@@ -341,6 +342,13 @@ def _render_cards(cards: list[dict[str, str]]) -> str:
 
 
 def _render_recommendations(score_payload: dict[str, Any], report_payload: dict[str, Any]) -> str:
+    deduped = _artifact_recommendations(score_payload, report_payload)
+    if not deduped:
+        return "<p class='muted'>No recommendations in the current artifacts.</p>"
+    return "<ul class='bullet-list'>" + "".join(f"<li>{escape(item)}</li>" for item in deduped[:8]) + "</ul>"
+
+
+def _artifact_recommendations(score_payload: dict[str, Any], report_payload: dict[str, Any]) -> list[str]:
     items = [str(item) for item in score_payload.get("recommendations", []) if str(item).strip()]
     items.extend(str(item) for item in report_payload.get("metrics", {}).get("recommendations", []) if str(item).strip())
     deduped: list[str] = []
@@ -349,9 +357,7 @@ def _render_recommendations(score_payload: dict[str, Any], report_payload: dict[
         if item not in seen:
             deduped.append(item)
             seen.add(item)
-    if not deduped:
-        return "<p class='muted'>No recommendations in the current artifacts.</p>"
-    return "<ul class='bullet-list'>" + "".join(f"<li>{escape(item)}</li>" for item in deduped[:8]) + "</ul>"
+    return deduped
 
 
 def _render_seller_candidates(candidate_views: list[dict[str, Any]]) -> str:
@@ -698,7 +704,263 @@ def _render_extension_role_summary(frozen_eval_payload: dict[str, Any]) -> str:
     )
 
 
-def build_round_visualization_html(
+def _render_collaboration_panel(collaboration: dict[str, Any]) -> str:
+    agents = list(collaboration.get("agents", []))
+    agreements = list(collaboration.get("agreements", []))
+    conflicts = list(collaboration.get("conflicts", []))
+    adopted_changes = list(collaboration.get("adopted_changes", []))
+    timeline = list(collaboration.get("timeline", []))
+    if not agents and not agreements and not conflicts and not adopted_changes and not timeline:
+        return "<p class='muted'>No collaboration summary attached to this round.</p>"
+
+    def _render_link(link: dict[str, Any]) -> str:
+        target = str(link.get("target") or "").strip()
+        label = str(link.get("label") or "Open").strip()
+        href_map = {
+            "executive": "#recommendations-panel",
+            "comparison": "#comparison-panel",
+            "seller-table": "#seller-candidates-panel",
+            "bridge": "#bridge-graph-panel",
+            "candidate-detail": "#candidate-detail-panel",
+            "frozen-eval": "#frozen-eval-panel",
+            "queue": "#seller-candidates-panel",
+        }
+        href = href_map.get(target, "#")
+        return f"<a class='mini-chip' href='{escape(href)}'>{escape(label)}</a>"
+
+    agent_cards = "".join(
+        "<article class='agent-card'>"
+        f"<h3>{escape(str(agent.get('name') or 'Agent'))}</h3>"
+        f"<p class='agent-focus'>{escape(str(agent.get('focus') or '-'))}</p>"
+        f"<p>{escape(str(agent.get('contribution') or '-'))}</p>"
+        + (
+            "<ul class='agent-evidence'>"
+            + "".join(f"<li>{escape(str(item))}</li>" for item in agent.get("evidence", []))
+            + "</ul>"
+            if agent.get("evidence")
+            else ""
+        )
+        + (
+            "<div class='chip-row'>"
+            + "".join(_render_link(link) for link in agent.get("links", []))
+            + "</div>"
+            if agent.get("links")
+            else ""
+        )
+        + f"<p class='muted'><strong>Adopted:</strong> {escape(str(agent.get('adopted_change') or '-'))}</p>"
+        + "</article>"
+        for agent in agents
+    )
+    side_boxes = (
+        "<div class='collaboration-side'>"
+        + (
+            "<section class='collaboration-box'><h3>Consensus</h3><ul>"
+            + "".join(f"<li>{escape(str(item))}</li>" for item in agreements)
+            + "</ul></section>"
+            if agreements
+            else ""
+        )
+        + (
+            "<section class='collaboration-box'><h3>Conflicts</h3><ul>"
+            + "".join(f"<li>{escape(str(item))}</li>" for item in conflicts)
+            + "</ul></section>"
+            if conflicts
+            else ""
+        )
+        + (
+            "<section class='collaboration-box'><h3>Adopted Changes</h3><ul>"
+            + "".join(f"<li>{escape(str(item))}</li>" for item in adopted_changes)
+            + "</ul></section>"
+            if adopted_changes
+            else ""
+        )
+        + "</div>"
+    )
+    timeline_html = (
+        "<div class='collaboration-timeline'><h3>Collaboration Timeline</h3><div class='timeline-steps'>"
+        + "".join(
+            "<article class='timeline-step-card'>"
+            f"<div class='timeline-step-pill'>{escape(str(item.get('step') or '-'))}</div>"
+            "<div>"
+            f"<p class='timeline-step-lane'>{escape(str(item.get('lane') or '-'))}</p>"
+            f"<h4>{escape(str(item.get('title') or '-'))}</h4>"
+            f"<p>{escape(str(item.get('detail') or '-'))}</p>"
+            + (
+                "<div class='chip-row'>"
+                + "".join(_render_link(link) for link in item.get("links", []))
+                + "</div>"
+                if item.get("links")
+                else ""
+            )
+            + "</div></article>"
+            for item in timeline
+        )
+        + "</div></div>"
+        if timeline
+        else ""
+    )
+    return (
+        "<div class='collaboration-grid'>"
+        f"<div class='agent-grid'>{agent_cards}</div>"
+        f"{side_boxes}"
+        "</div>"
+        f"{timeline_html}"
+    )
+
+
+def _build_collaboration_summary(
+    score_summary: dict[str, Any],
+    report_metrics: dict[str, Any],
+    seller_recovery: dict[str, Any],
+    candidate_views: list[dict[str, Any]],
+    comparison_rounds: list[dict[str, Any]],
+) -> dict[str, Any]:
+    strong_bridge_candidates = sum(1 for item in candidate_views if item.get("candidate_tier") == "strong_bridge_unknown_seller")
+    weak_bridge_candidates = sum(1 for item in candidate_views if item.get("candidate_tier") == "weak_bridge_high_score")
+    avg_bridge_uplift = mean(_safe_float(item.get("bridge_uplift")) for item in candidate_views) if candidate_views else 0.0
+    current_f1 = _safe_float(report_metrics.get("best_val_f1"))
+    current_recovery = _safe_float(seller_recovery.get("recovery_rate"))
+    previous_round = comparison_rounds[-2] if len(comparison_rounds) >= 2 else None
+    previous_f1 = _safe_float(previous_round.get("best_val_f1")) if previous_round else 0.0
+    delta_f1 = current_f1 - previous_f1 if previous_round else 0.0
+    top_bridge = str(score_summary.get("top_bridge_seller_candidate") or "-")
+    bridge_rate = _safe_float(score_summary.get("bridge_candidate_rate"))
+
+    agents = [
+        {
+            "name": "Rules Agent",
+            "focus": "Training rules and label loop discipline",
+            "contribution": "Kept the closed loop stable by separating seed_train, holdout_eval, and feedback_pool.",
+            "evidence": [
+                f"best_val_f1 {current_f1:.4f}",
+                f"seller recovery {current_recovery:.4f}",
+                "holdout kept outside training",
+            ],
+            "adopted_change": "Bridge-first review remains gated by the frozen holdout rather than raw row score alone.",
+            "links": [
+                {"label": "Frozen Eval", "target": "frozen-eval"},
+                {"label": "Round Comparison", "target": "comparison"},
+                {"label": "Executive Summary", "target": "executive"},
+            ],
+        },
+        {
+            "name": "Graph Agent",
+            "focus": "Buyer-seller bridge structure and candidate uplift",
+            "contribution": "Shifted ranking toward bridge-backed unknown sellers instead of owner-heavy score clusters.",
+            "evidence": [
+                f"strong bridge candidates {strong_bridge_candidates}",
+                f"avg bridge uplift {avg_bridge_uplift:.4f}",
+                f"top bridge seller {top_bridge}",
+            ],
+            "adopted_change": "Strong bridge unknown sellers are now the first review queue.",
+            "links": [
+                {"label": "Strong Bridge Queue", "target": "seller-table", "tier": "strong_bridge_unknown_seller"},
+                {"label": "Bridge Graph", "target": "bridge"},
+                {"label": "Candidate Detail", "target": "candidate-detail", "seller": top_bridge},
+            ],
+        },
+        {
+            "name": "Experiment Agent",
+            "focus": "Round-to-round comparison and parameter movement",
+            "contribution": "Tracked whether changes improved extension value rather than only validation fit.",
+            "evidence": [
+                f"delta val_f1 {(delta_f1):+.4f}" if previous_round else "no previous round attached",
+                f"bridge candidate rate {bridge_rate:.4f}",
+                f"weak bridge candidates {weak_bridge_candidates}",
+            ],
+            "adopted_change": "Round comparison is interpreted through extension outputs, not just classifier metrics.",
+            "links": [
+                {"label": "Comparison Table", "target": "comparison"},
+                {"label": "Executive Summary", "target": "executive"},
+                {"label": "Weak Bridge Tier", "target": "seller-table", "tier": "weak_bridge_high_score"},
+            ],
+        },
+        {
+            "name": "Evaluation Agent",
+            "focus": "Frozen-eval and manual review workload",
+            "contribution": "Measured whether seller recovery and review burden stay acceptable after each change.",
+            "evidence": [
+                f"holdout positive sellers {_safe_int(seller_recovery.get('holdout_positive_seller_count'))}",
+                f"recovered sellers {_safe_int(seller_recovery.get('recovered_positive_sellers'))}",
+                f"returned seller candidates {_safe_int(score_summary.get('returned_seller_candidates'))}",
+            ],
+            "adopted_change": "Showcase emphasizes recovery and review queue size together.",
+            "links": [
+                {"label": "Frozen Eval", "target": "frozen-eval"},
+                {"label": "Presentation Queue", "target": "queue"},
+                {"label": "Seller Candidates", "target": "seller-table"},
+            ],
+        },
+    ]
+
+    agreements = [
+        "Bridge-backed seller candidates should be reviewed before weak bridge or score-only candidates.",
+        "Frozen holdout must stay outside training so round-to-round gains remain credible.",
+        "Outcome reporting should emphasize extension value, not just row-level fit.",
+    ]
+    conflicts = [
+        "Validation F1 can improve while candidate diversity or extension value stays flat, so metrics alone are insufficient.",
+        "High score clusters from old subjects can still dominate unless bridge evidence is given explicit priority.",
+    ]
+    adopted_changes = [
+        "Strong-bridge tier is now the default seller review export.",
+        "Showcase now presents queue, story, notes, and bridge graph as one coordinated review surface.",
+        "Round summaries explicitly track bridge-backed candidates and seller recovery.",
+    ]
+    timeline = [
+        {
+            "step": "01",
+            "lane": "Rules",
+            "title": "Freeze the evaluation boundary",
+            "detail": "Training labels were split into seed_train, holdout_eval, and feedback_pool so later gains could be measured without leakage.",
+            "links": [
+                {"label": "Frozen Eval", "target": "frozen-eval"},
+                {"label": "Round Comparison", "target": "comparison"},
+            ],
+        },
+        {
+            "step": "02",
+            "lane": "Graph",
+            "title": "Promote buyer-seller bridge evidence",
+            "detail": "Candidate ranking was shifted toward bridge-backed unknown sellers instead of owner-heavy or score-only clusters.",
+            "links": [
+                {"label": "Strong Bridge Queue", "target": "seller-table", "tier": "strong_bridge_unknown_seller"},
+                {"label": "Bridge Graph", "target": "bridge"},
+                {"label": "Candidate Detail", "target": "candidate-detail", "seller": top_bridge},
+            ],
+        },
+        {
+            "step": "03",
+            "lane": "Experiment",
+            "title": "Compare rounds by extension value",
+            "detail": "Round deltas were interpreted through strong-bridge count, seller recovery, and candidate queue quality rather than validation F1 alone.",
+            "links": [
+                {"label": "Comparison Table", "target": "comparison"},
+                {"label": "Weak Bridge Tier", "target": "seller-table", "tier": "weak_bridge_high_score"},
+            ],
+        },
+        {
+            "step": "04",
+            "lane": "Evaluation",
+            "title": "Adopt bridge-first review",
+            "detail": "The final decision was to keep strong_bridge_unknown_seller as the first review queue and present recovery plus review burden together.",
+            "links": [
+                {"label": "Presentation Queue", "target": "queue"},
+                {"label": "Frozen Eval", "target": "frozen-eval"},
+                {"label": "Executive Summary", "target": "executive"},
+            ],
+        },
+    ]
+    return {
+        "agents": agents,
+        "agreements": agreements,
+        "conflicts": conflicts,
+        "adopted_changes": adopted_changes,
+        "timeline": timeline,
+    }
+
+
+def build_round_showcase_manifest(
     score_json_path: str | Path,
     *,
     report_json_path: str | Path | None = None,
@@ -710,7 +972,7 @@ def build_round_visualization_html(
     max_candidates: int = 20,
     max_support_rows: int = 8,
     max_top_rows: int = 60,
-) -> str:
+) -> dict[str, Any]:
     score_payload = _load_json(score_json_path)
     report_payload = _load_json(report_json_path)
     frozen_eval_payload = _load_json(frozen_eval_json_path)
@@ -727,11 +989,11 @@ def build_round_visualization_html(
     bridge_graph = _build_bridge_graph(candidate_views)
 
     current_title = title or str(report_payload.get("round_name") or Path(score_json_path).stem)
-    score_summary = score_payload.get("summary", {})
-    model_summary = score_payload.get("model", {})
-    report_metrics = report_payload.get("metrics", {})
-    frozen_metrics = frozen_eval_payload.get("metrics", {})
-    seller_recovery = frozen_eval_payload.get("seller_candidate_recovery", {})
+    score_summary = dict(score_payload.get("summary", {}))
+    model_summary = dict(score_payload.get("model", {}))
+    report_metrics = dict(report_payload.get("metrics", {}))
+    frozen_metrics = dict(frozen_eval_payload.get("metrics", {}))
+    seller_recovery = dict(frozen_eval_payload.get("seller_candidate_recovery", {}))
     review_counts = {
         "confirmed_positive": sum(1 for item in candidate_views if item.get("review_label") == "confirmed_positive"),
         "confirmed_negative": sum(1 for item in candidate_views if item.get("review_label") == "confirmed_negative"),
@@ -744,6 +1006,13 @@ def build_round_visualization_html(
     avg_bridge_buyers = mean(_safe_int(item.get("bridge_buyers")) for item in candidate_views) if candidate_views else 0.0
     avg_bridge_ratio = mean(_safe_float(item.get("bridge_support_ratio")) for item in candidate_views) if candidate_views else 0.0
     avg_bridge_uplift = mean(_safe_float(item.get("bridge_uplift")) for item in candidate_views) if candidate_views else 0.0
+    collaboration = _build_collaboration_summary(
+        score_summary,
+        report_metrics,
+        seller_recovery,
+        candidate_views,
+        list(resolved_comparison_payload.get("rounds", [])),
+    )
     cards = [
         {
             "label": "Seller Candidates",
@@ -796,6 +1065,94 @@ def build_round_visualization_html(
             "note": f"+ {review_counts['confirmed_positive']} / - {review_counts['confirmed_negative']} / ? {review_counts['uncertain']}",
         },
     ]
+    return {
+        "title": current_title,
+        "meta": {
+            "round_name": str(report_payload.get("round_name") or current_title),
+            "score_source": str(score_json_path),
+            "report_source": str(report_json_path or ""),
+            "frozen_eval_source": str(frozen_eval_json_path or ""),
+            "comparison_source": str(comparison_json_path or ""),
+            "reviews_source": str(reviews_path or ""),
+            "max_candidates": int(max_candidates),
+            "max_support_rows": int(max_support_rows),
+            "max_top_rows": int(max_top_rows),
+            "presentation_mode_default": "public",
+            "sensitive_fields_masked": [
+                "seller_account",
+                "buyer_account",
+                "sample_counterparties",
+                "counterparty_name",
+                "counterparty",
+                "review_note",
+            ],
+        },
+        "overview_cards": cards,
+        "recommendations": _artifact_recommendations(score_payload, report_payload),
+        "score_summary": score_summary,
+        "model_summary": model_summary,
+        "report_metrics": report_metrics,
+        "frozen_eval_metrics": frozen_metrics,
+        "review_counts": review_counts,
+        "seller_recovery": seller_recovery,
+        "seller_candidates": candidate_views,
+        "bridge_graph": bridge_graph,
+        "top_rows": top_rows[:max_top_rows],
+        "comparison_rounds": list(resolved_comparison_payload.get("rounds", [])),
+        "collaboration": collaboration,
+        "extension_role_summary": list(frozen_eval_payload.get("extension_role_summary", [])),
+        "frozen_eval": {
+            "total_rows": _safe_int(frozen_eval_payload.get("total_rows")),
+            "positive_rows": _safe_int(frozen_eval_payload.get("positive_rows")),
+            "negative_rows": _safe_int(frozen_eval_payload.get("negative_rows")),
+        },
+    }
+
+
+def build_round_visualization_html(
+    score_json_path: str | Path,
+    *,
+    report_json_path: str | Path | None = None,
+    frozen_eval_json_path: str | Path | None = None,
+    comparison_json_path: str | Path | None = None,
+    comparison_payload: dict[str, Any] | None = None,
+    reviews_path: str | Path | None = None,
+    title: str | None = None,
+    max_candidates: int = 20,
+    max_support_rows: int = 8,
+    max_top_rows: int = 60,
+) -> str:
+    manifest = build_round_showcase_manifest(
+        score_json_path,
+        report_json_path=report_json_path,
+        frozen_eval_json_path=frozen_eval_json_path,
+        comparison_json_path=comparison_json_path,
+        comparison_payload=comparison_payload,
+        reviews_path=reviews_path,
+        title=title,
+        max_candidates=max_candidates,
+        max_support_rows=max_support_rows,
+        max_top_rows=max_top_rows,
+    )
+    current_title = str(manifest.get("title") or "")
+    score_summary = dict(manifest.get("score_summary", {}))
+    model_summary = dict(manifest.get("model_summary", {}))
+    report_metrics = dict(manifest.get("report_metrics", {}))
+    frozen_metrics = dict(manifest.get("frozen_eval_metrics", {}))
+    seller_recovery = dict(manifest.get("seller_recovery", {}))
+    review_counts = dict(manifest.get("review_counts", {}))
+    collaboration = dict(manifest.get("collaboration", {}))
+    cards = list(manifest.get("overview_cards", []))
+    candidate_views = list(manifest.get("seller_candidates", []))
+    top_rows = list(manifest.get("top_rows", []))
+    bridge_graph = dict(manifest.get("bridge_graph", {}))
+    resolved_comparison_payload = {"rounds": list(manifest.get("comparison_rounds", []))}
+    frozen_eval_payload = {
+        "total_rows": manifest.get("frozen_eval", {}).get("total_rows", 0),
+        "extension_role_summary": list(manifest.get("extension_role_summary", [])),
+    }
+    score_payload = {"recommendations": list(manifest.get("recommendations", []))}
+    report_payload = {"metrics": {"recommendations": list(manifest.get("recommendations", []))}}
 
     css = """
 body {
@@ -887,6 +1244,17 @@ body {
 }
 .bullet-list li + li {
   margin-top: 8px;
+}
+.mini-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: rgba(221, 137, 67, 0.14);
+  color: #85451f;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
 }
 .split-grid {
   display: grid;
@@ -1091,6 +1459,85 @@ tr:hover td {
   outline: 2px solid rgba(170, 70, 35, 0.3);
   background: rgba(255, 240, 220, 0.56);
 }
+.collaboration-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 16px;
+}
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.agent-card,
+.collaboration-box,
+.timeline-step-card {
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,243,233,0.96));
+  border: 1px solid rgba(117, 95, 49, 0.1);
+}
+.agent-card h3,
+.collaboration-box h3,
+.collaboration-timeline h3 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+.agent-focus,
+.timeline-step-lane {
+  margin: 0 0 8px;
+  color: #7c6340;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.agent-card p,
+.timeline-step-card p {
+  margin: 0;
+  color: #66707a;
+  line-height: 1.6;
+}
+.agent-evidence {
+  margin: 12px 0;
+  padding-left: 18px;
+}
+.collaboration-side {
+  display: grid;
+  gap: 14px;
+}
+.collaboration-box ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.collaboration-box li + li,
+.agent-evidence li + li {
+  margin-top: 8px;
+}
+.collaboration-timeline {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed rgba(117, 95, 49, 0.16);
+}
+.timeline-steps {
+  display: grid;
+  gap: 12px;
+}
+.timeline-step-card {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 14px;
+}
+.timeline-step-pill {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #345f7d;
+  color: #f6fbff;
+  font-weight: 700;
+}
 .node-label {
   fill: #1f2328;
   font-size: 12px;
@@ -1108,7 +1555,7 @@ a:hover {
   text-decoration: underline;
 }
 @media (max-width: 1080px) {
-  .hero, .split-grid, .candidate-grid, .metrics-grid {
+  .hero, .split-grid, .candidate-grid, .metrics-grid, .collaboration-grid, .agent-grid {
     grid-template-columns: 1fr;
   }
   .page {
@@ -1264,36 +1711,43 @@ applyTableFilters();
     </section>
 
     <section class="section split-grid">
-      <div class="panel">
+      <div class="panel" id="recommendations-panel">
         <h2>Recommendations</h2>
         {_render_recommendations(score_payload, report_payload)}
       </div>
-      <div class="panel">
+      <div class="panel" id="comparison-panel">
         <h2>Round Comparison</h2>
         {_render_round_comparison(resolved_comparison_payload)}
       </div>
     </section>
 
     <section class="section">
-      <div class="panel">
+      <div class="panel" id="collaboration-panel">
+        <h2>Agent Collaboration</h2>
+        {_render_collaboration_panel(collaboration)}
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="panel" id="seller-candidates-panel">
         <h2>Seller Candidates</h2>
         {_render_seller_candidates(candidate_views)}
       </div>
     </section>
 
     <section class="section split-grid">
-      <div class="panel">
+      <div class="panel" id="bridge-graph-panel">
         <h2>Buyer to Seller Bridge Graph</h2>
         {_render_bridge_graph(bridge_graph)}
       </div>
-      <div class="panel">
+      <div class="panel" id="frozen-eval-panel">
         <h2>Frozen Eval Breakdown</h2>
         {_render_extension_role_summary(frozen_eval_payload)}
       </div>
     </section>
 
     <section class="section">
-      <div class="panel">
+      <div class="panel" id="candidate-detail-panel">
         <h2>Candidate Details</h2>
         {_render_candidate_details(candidate_views)}
       </div>
@@ -1343,3 +1797,105 @@ def export_round_visualization_html(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(html, encoding="utf-8")
     return path
+
+
+def export_round_showcase_manifest(
+    output_path: str | Path,
+    *,
+    score_json_path: str | Path,
+    report_json_path: str | Path | None = None,
+    frozen_eval_json_path: str | Path | None = None,
+    comparison_json_path: str | Path | None = None,
+    comparison_payload: dict[str, Any] | None = None,
+    reviews_path: str | Path | None = None,
+    title: str | None = None,
+    max_candidates: int = 20,
+    max_support_rows: int = 8,
+    max_top_rows: int = 60,
+) -> Path:
+    manifest = build_round_showcase_manifest(
+        score_json_path,
+        report_json_path=report_json_path,
+        frozen_eval_json_path=frozen_eval_json_path,
+        comparison_json_path=comparison_json_path,
+        comparison_payload=comparison_payload,
+        reviews_path=reviews_path,
+        title=title,
+        max_candidates=max_candidates,
+        max_support_rows=max_support_rows,
+        max_top_rows=max_top_rows,
+    )
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def export_round_showcase_bundle(
+    output_dir: str | Path,
+    *,
+    score_json_path: str | Path,
+    report_json_path: str | Path | None = None,
+    frozen_eval_json_path: str | Path | None = None,
+    comparison_json_path: str | Path | None = None,
+    comparison_payload: dict[str, Any] | None = None,
+    reviews_path: str | Path | None = None,
+    title: str | None = None,
+    max_candidates: int = 20,
+    max_support_rows: int = 8,
+    max_top_rows: int = 60,
+    extra_manifests: list[dict[str, str]] | None = None,
+) -> Path:
+    manifest = build_round_showcase_manifest(
+        score_json_path,
+        report_json_path=report_json_path,
+        frozen_eval_json_path=frozen_eval_json_path,
+        comparison_json_path=comparison_json_path,
+        comparison_payload=comparison_payload,
+        reviews_path=reviews_path,
+        title=title,
+        max_candidates=max_candidates,
+        max_support_rows=max_support_rows,
+        max_top_rows=max_top_rows,
+    )
+    bundle_dir = Path(output_dir)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    frontend_root = Path(__file__).resolve().parents[2] / "frontend" / "showcase"
+    for name in ("index.html", "app.js", "styles.css"):
+        shutil.copyfile(frontend_root / name, bundle_dir / name)
+    manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
+    (bundle_dir / "showcase_manifest.json").write_text(manifest_json, encoding="utf-8")
+    (bundle_dir / "manifest.js").write_text(f"window.__TXFLOW_SHOWCASE__ = {manifest_json};\n", encoding="utf-8")
+    index_payload = {
+        "rounds": [
+            {
+                "round_name": str(manifest.get("meta", {}).get("round_name") or "current"),
+                "title": str(manifest.get("title") or manifest.get("meta", {}).get("round_name") or "current"),
+                "manifest_file": "showcase_manifest.json",
+                "manifest": manifest,
+            }
+        ]
+    }
+    manifest_dir = bundle_dir / "manifests"
+    if extra_manifests:
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+    for index, item in enumerate(extra_manifests or [], start=1):
+        source = Path(str(item.get("path") or "")).expanduser()
+        if not source.exists():
+            continue
+        round_name = str(item.get("round_name") or source.stem or f"round_{index}")
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        file_name = f"{round_name}.json"
+        (manifest_dir / file_name).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        index_payload["rounds"].append(
+            {
+                "round_name": round_name,
+                "title": str(payload.get("title") or round_name),
+                "manifest_file": f"manifests/{file_name}",
+                "manifest": payload,
+            }
+        )
+    index_json = json.dumps(index_payload, ensure_ascii=False, indent=2)
+    (bundle_dir / "showcase_index.json").write_text(index_json, encoding="utf-8")
+    (bundle_dir / "index.js").write_text(f"window.__TXFLOW_SHOWCASE_INDEX__ = {index_json};\n", encoding="utf-8")
+    return bundle_dir

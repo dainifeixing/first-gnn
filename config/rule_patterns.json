@@ -1,0 +1,57 @@
+{
+  "qr_hint_tokens": {
+    "common": [
+      "二维码",
+      "扫码",
+      "收款码",
+      "付款码",
+      "当面付"
+    ],
+    "wechat": [
+      "扫二维码付款"
+    ],
+    "alipay": [
+      "碰一下"
+    ]
+  },
+  "red_packet_tokens": [
+    "红包"
+  ],
+  "failed_or_invalid_tokens": [
+    "失败",
+    "手续费",
+    "撤销",
+    "关闭",
+    "退款关闭"
+  ],
+  "platform_account_tokens": {
+    "common": [
+      "@meituan.com",
+      "@bytedance.com",
+      "@service.aliyun.com",
+      "@alibaba-inc.com",
+      "@ccbfund.cn",
+      "@fund123.cn",
+      "@kuaishou.com",
+      "@yiran.com"
+    ],
+    "wechat": [
+      "pddzhifubao",
+      "zxpayment",
+      "shgwzz",
+      "hnjrtt",
+      "bjztbl",
+      "gtbzhuanqia",
+      "xiaoxuelei"
+    ],
+    "alipay": [
+      "pddzhifubao",
+      "zxpayment",
+      "shgwzz",
+      "hnjrtt",
+      "bjztbl",
+      "gtbzhuanqia",
+      "xiaoxuelei"
+    ]
+  }
+}

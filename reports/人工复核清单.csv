@@ -1,0 +1,51 @@
+bucket,score,workbook_path,row_index,transaction_id,amount,counterparty,remark,label_status
+A. 高优先复核,0.9879,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,219,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+A. 高优先复核,0.9877,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,173,2026013060235350978768410311401,100.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+A. 高优先复核,0.9865,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,234,2026012372235565574347410300407,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+A. 高优先复核,0.9864,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,221,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+A. 高优先复核,0.9858,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,208,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+A. 高优先复核,0.9857,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,413,-,100.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+A. 高优先复核,0.9853,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,160,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9843,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,159,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9841,/home/doudougou/下载/3.29/A68853039陆平枝.xlsx,101,-,100.00,085e9858ec4596cec51dc01f8@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9839,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,845,2025091990165078418054510110601,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9835,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,222,-,150.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9829,/home/doudougou/下载/3.29/A68853039陆平枝.xlsx,99,-,100.00,085e9858ec4596cec51dc01f8@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9827,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,770,2025092572205008555637410300004,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9822,/home/doudougou/下载/3.29/wxid_4ry9iy64yip312.xlsx,44,-,400.00,085e9858eced1e93bf232c870@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9821,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,149,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9805,/home/doudougou/下载/3.29/A68853039陆平枝.xlsx,102,2025042058235874955742210100001,120.00,085e9858ec4596cec51dc01f8@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9804,/home/doudougou/下载/3.29/wxid_4ry9iy64yip312.xlsx,71,2025111659155452405101410201208,400.00,085e9858eced1e93bf232c870@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9794,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,223,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9792,/home/doudougou/下载/3.29/A68853039陆平枝.xlsx,103,2025042058235859114052210101108,120.00,085e9858ec4596cec51dc01f8@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9789,/home/doudougou/下载/3.29/A68853039陆平枝.xlsx,104,-,150.00,085e9858ec4596cec51dc01f8@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9789,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,843,2025092069225838309592610110408,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9787,/home/doudougou/下载/3.29/wxid_4ry9iy64yip312.xlsx,158,-,100.00,085e9858eced1e93bf232c870@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9775,/home/doudougou/下载/3.29/A68853039陆平枝.xlsx,113,-,200.00,085e9858ec4596cec51dc01f8@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9773,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,235,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.977,/home/doudougou/下载/3.29/wxid_4ry9iy64yip312.xlsx,43,2025112356225255893821810210304,400.00,085e9858eced1e93bf232c870@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9769,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,158,-,200.88,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9769,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,176,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.975,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,411,2026010132215649310474760110705,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：零钱通支付/转账（微众代销）##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9746,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,412,2026010134231798543043450200701,500.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9746,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,414,2026010169175081343344210101107,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9744,/home/doudougou/下载/3.29/wxid_4ry9iy64yip312.xlsx,122,1025548814535034,400.00,085e9858eced1e93bf232c870@wx.tenpay.com,备注：微信转账##网银联单号类型：银联,unlabeled
+B. 混合样本/次优先复核,0.9743,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,217,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9742,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,134,1208542900281412,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：银联,unlabeled
+B. 混合样本/次优先复核,0.9742,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,769,2025092519205797296441660210005,500.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：零钱通支付/转账（微众代销）##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9734,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,771,2025092539235361852896160311003,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：零钱通支付/转账（微众代销）##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9733,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,846,0919591449981940,500.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：银联,unlabeled
+B. 混合样本/次优先复核,0.9725,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,844,0919601756997121,500.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：银联,unlabeled
+B. 混合样本/次优先复核,0.9712,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,144,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.971,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,231,2026012345195733066694160100501,300.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：零钱通支付/转账（微众代销）##网银联单号类型：网联,unlabeled
+B. 混合样本/次优先复核,0.9708,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,596,-,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+B. 混合样本/次优先复核,0.9704,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,441,-,400.88,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+C. 低优先复核,0.9698,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,597,HCFT2025101411776189151227274,150.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：零钱通支付/转账（腾安代销）,unlabeled
+C. 低优先复核,0.9688,/home/doudougou/下载/3.29/LoeQ__-413 (1).xlsx,116,-,200.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+C. 低优先复核,0.9687,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,115,1209542950524755,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：银联,unlabeled
+C. 低优先复核,0.9682,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,103,1210583320276199,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：银联,unlabeled
+C. 低优先复核,0.968,/home/doudougou/下载/3.29/wxid_4ry9iy64yip312.xlsx,159,2025101969225646688144310101203,400.00,085e9858eced1e93bf232c870@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+C. 低优先复核,0.9674,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,842,2025092084215380028648410311005,402.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled
+C. 低优先复核,0.9672,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,560,1016574374094395,400.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账##网银联单号类型：银联,unlabeled
+C. 低优先复核,0.9671,/home/doudougou/下载/3.29/LoeQ__-413（微信流水）.xlsx,561,-,100.00,085e9858e587e892fdd7b8122@wx.tenpay.com,备注：微信转账,unlabeled
+C. 低优先复核,0.9665,/home/doudougou/下载/3.29/wxid_4ry9iy64yip312.xlsx,72,2025111634181788264783450201400,400.00,085e9858eced1e93bf232c870@wx.tenpay.com,备注：微信转账##网银联单号类型：网联,unlabeled

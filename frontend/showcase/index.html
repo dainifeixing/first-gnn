@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>txflow-risk showcase</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">txflow-risk showcase</p>
+          <h1 id="page-title">Loading showcase...</h1>
+          <p id="page-subtitle" class="hero-copy">Preparing seller extension review data.</p>
+        </div>
+        <div class="hero-meta">
+          <div class="hero-meta-block">
+            <div class="hero-meta-label">Round</div>
+            <div class="chip-row" id="round-chips"></div>
+          </div>
+          <div class="hero-meta-block">
+            <div class="hero-meta-label">View Mode</div>
+            <div class="chip-row" id="mode-chips"></div>
+          </div>
+          <div class="hero-meta-label">Manifest</div>
+          <div id="manifest-path" class="hero-meta-value">showcase_manifest.json</div>
+        </div>
+      </header>
+
+      <main class="page-grid">
+        <section class="panel span-2" data-panel="executive">
+          <div class="panel-head">
+            <h2>Executive Summary</h2>
+            <div class="toolbar">
+              <div class="chip-row" id="executive-controls"></div>
+              <p class="panel-note">A presentation-first summary of extension value, round deltas, and top review priorities.</p>
+            </div>
+          </div>
+          <div id="executive-summary"></div>
+        </section>
+
+        <section class="panel" data-panel="queue">
+          <div class="panel-head">
+            <h2>Presentation Queue</h2>
+            <div class="toolbar">
+              <div class="chip-row" id="presentation-controls"></div>
+              <p class="panel-note">Top candidates to walk through in a stakeholder review.</p>
+            </div>
+          </div>
+          <div id="presentation-queue"></div>
+        </section>
+
+        <section class="panel span-2" data-panel="collaboration">
+          <div class="panel-head">
+            <h2>Agent Collaboration</h2>
+            <p class="panel-note">How multiple analysis lanes contributed, aligned, and converged on the current round decisions.</p>
+          </div>
+          <div id="agent-collaboration"></div>
+        </section>
+
+        <section class="panel" data-panel="notes">
+          <div class="panel-head">
+            <h2>Presenter Notes</h2>
+            <div class="toolbar">
+              <div class="chip-row" id="briefing-controls"></div>
+              <p class="panel-note">A short speaking script for the currently selected candidate.</p>
+            </div>
+          </div>
+          <div id="presenter-notes"></div>
+        </section>
+
+        <section class="panel span-2" data-panel="overview">
+          <div class="panel-head">
+            <h2>Overview</h2>
+            <p class="panel-note">Bridge-first seller review snapshot for external walkthroughs.</p>
+          </div>
+          <div id="overview-cards" class="cards-grid"></div>
+        </section>
+
+        <section class="panel" data-panel="recommendations">
+          <div class="panel-head">
+            <h2>Recommendations</h2>
+          </div>
+          <ul id="recommendations" class="bullet-list"></ul>
+        </section>
+
+        <section class="panel" data-panel="comparison">
+          <div class="panel-head">
+            <h2>Round Comparison</h2>
+          </div>
+          <div id="comparison-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel span-2" data-panel="seller-table">
+          <div class="panel-head">
+            <h2>Seller Candidates</h2>
+            <div class="toolbar">
+              <input id="seller-filter" class="filter-input" placeholder="Search seller / counterparty / review note" />
+              <div class="chip-row" id="tier-chips"></div>
+            </div>
+          </div>
+          <div id="seller-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel" data-panel="bridge">
+          <div class="panel-head">
+            <h2>Bridge Graph</h2>
+            <p class="panel-note">Top candidate bridge paths.</p>
+          </div>
+          <div id="bridge-graph" class="bridge-graph"></div>
+        </section>
+
+        <section class="panel" data-panel="frozen-eval">
+          <div class="panel-head">
+            <h2>Frozen Eval</h2>
+          </div>
+          <div id="frozen-eval" class="key-value-list"></div>
+        </section>
+
+        <section class="panel span-2" data-panel="story">
+          <div class="panel-head">
+            <h2>Extension Story</h2>
+            <p class="panel-note">Explain the bridge path from known seller seeds to the selected unknown seller candidate.</p>
+          </div>
+          <div id="story-panel"></div>
+        </section>
+
+        <section class="panel span-2" data-panel="candidate-detail">
+          <div class="panel-head">
+            <h2>Candidate Detail</h2>
+            <p id="detail-empty" class="panel-note">Select a seller candidate to inspect bridge evidence and support rows.</p>
+          </div>
+          <div id="candidate-detail"></div>
+        </section>
+      </main>
+    </div>
+    <script src="./index.js"></script>
+    <script src="./manifest.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

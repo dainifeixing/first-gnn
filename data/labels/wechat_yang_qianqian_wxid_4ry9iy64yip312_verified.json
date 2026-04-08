@@ -1,0 +1,17 @@
+{
+  "dataset_name": "wechat_yang_qianqian_wxid_4ry9iy64yip312_verified_positive",
+  "label": "sex_work_related_income",
+  "subject": "杨欠欠",
+  "status": "verified",
+  "verified_by": "user",
+  "verified_on": "2026-03-31",
+  "source_file": "/home/doudougou/下载/3.29/wxid_4ry9iy64yip312.xlsx",
+  "transaction_ids": [
+    "2026011028175005132814410101409",
+    "2026011028175040522564410100901",
+    "2026011028175005222534410100508",
+    "2025121659235268188281410201409",
+    "2025101177235424131663310200904"
+  ],
+  "notes": "User confirmed these transaction IDs in the alternate WeChat account ledger are verified prostitution-related income and should be used as positive training labels."
+}
